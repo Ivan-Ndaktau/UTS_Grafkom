@@ -1,0 +1,3630 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seedot Nuzleaf Shiftry</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #controls-info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 10px;
+            background-color: rgba(0, 0, 0, 0.6);
+            color: white;
+            font-family: sans-serif;
+            font-size: 14px;
+            border-radius: 8px;
+            pointer-events: none;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="controls-info">
+
+        <div class="section">
+            <h4>Kamera</h4>
+            <ul>
+                <li><b>Gerak:</b> W / A / S / D</li>
+                <li><b>Terbang Naik:</b> Space</li>
+                <li><b>Terbang Turun:</b> Ctrl Kiri</li>
+                <li><b>Lihat:</b> Gerakkan Mouse</li>
+                <li><b>Kunci Kursor:</b> Klik layar (Esc untuk lepas)</li>
+            </ul>
+        </div>
+
+        <div class="section">
+            <h4>Matahari (Pencahayaan)</h4>
+            <ul>
+                <li><b>Rotasi Horizontal:</b> J / L</li>
+                <li><b>Ketinggian:</b> I / K</li>
+            </ul>
+        </div>
+
+        <div class="section skill">
+            <h4>Skill Shiftry</h4>
+            <ul>
+                <li><b>1</b> — <span class="skill-name">Razor Leaf</span></li>
+                <li><b>2</b> — <span class="skill-name">Dark Pulse</span></li>
+                <li><b>3</b> — <span class="skill-name">Leaf Storm</span></li>
+                <li><b>4</b> — <span class="skill-name">Swords Dance</span></li>
+            </ul>
+        </div>
+
+        <div class="section">
+            <h4>Mode Spectate</h4>
+            <ul>
+                <li><b>7:</b> Fokus ke Seedot</li>
+                <li><b>8:</b> Fokus ke Nuzleaf</li>
+                <li><b>9:</b> Fokus ke Shiftry</li>
+                <li><b>0:</b> Kembali ke Kamera Bebas</li>
+            </ul>
+        </div>
+    </div>
+    <canvas id="glCanvas"></canvas>
+
+    <script id="shadow-vertex-shader" type="x-shader/x-vertex">
+        attribute vec4 a_position;
+        uniform mat4 u_modelMatrix;
+        uniform mat4 u_lightViewMatrix;
+        uniform mat4 u_lightProjectionMatrix;
+        void main() {
+            gl_Position = u_lightProjectionMatrix * u_lightViewMatrix * u_modelMatrix * a_position;
+        }
+    </script>
+    <script id="shadow-fragment-shader" type="x-shader/x-fragment">
+        precision mediump float;
+        void main() {
+            const vec4 bitShift = vec4(1.0, 256.0, 256.0 * 256.0, 256.0 * 256.0 * 256.0);
+            const vec4 bitMask = vec4(1.0/256.0, 1.0/256.0, 1.0/256.0, 0.0);
+            vec4 rgbaDepth = fract(gl_FragCoord.z * bitShift);
+            rgbaDepth -= rgbaDepth.gbaa * bitMask;
+            gl_FragColor = rgbaDepth;
+        }
+    </script>
+
+    <script id="vertex-shader" type="x-shader/x-vertex">
+        attribute vec4 a_position;
+        attribute vec3 a_color;
+        attribute vec3 a_normal;
+        uniform mat4 u_projectionMatrix;
+        uniform mat4 u_viewMatrix;
+        uniform mat4 u_modelMatrix;
+        uniform mat4 u_lightViewMatrix;
+        uniform mat4 u_lightProjectionMatrix;
+        varying vec3 v_normal;
+        varying vec3 v_color;
+        varying vec3 v_worldPosition;
+        varying vec4 v_positionFromLight;
+        varying vec2 v_screenCoord; 
+        varying vec3 v_objectPosition;
+
+
+        void main() {
+            gl_Position = u_projectionMatrix * u_viewMatrix * u_modelMatrix * a_position;
+            v_normal = mat3(u_modelMatrix) * a_normal;
+            v_worldPosition = (u_modelMatrix * a_position).xyz;
+            v_positionFromLight = u_lightProjectionMatrix * u_lightViewMatrix * u_modelMatrix * a_position;
+            v_screenCoord = gl_Position.xy / gl_Position.w; 
+            v_objectPosition = a_position.xyz;
+            v_color = a_color;
+        }
+
+    </script>
+
+
+
+    <script id="fragment-shader" type="x-shader/x-fragment">
+        precision mediump float;
+        varying vec3 v_normal;
+        varying vec3 v_color;
+        varying vec3 v_worldPosition;
+        varying vec4 v_positionFromLight;
+        varying vec2 v_screenCoord; 
+        varying vec3 v_objectPosition;
+        uniform vec3 u_lightDirection;
+        uniform vec3 u_lightColor;
+        uniform vec3 u_ambientLightColor;
+        uniform vec3 u_objectColor;
+        uniform vec3 u_viewPosition;
+        uniform float u_shininess;
+        uniform vec3 u_fogColor;
+        uniform float u_fogDensity;
+        uniform sampler2D u_shadowMap;
+        uniform vec2 u_shadowMapSize; //  Untuk PCF
+        uniform bool u_isGrass;
+        uniform bool u_isGround; 
+        uniform bool u_isBody;
+        uniform bool u_useVertexColor;
+
+
+        float unpackDepth(const in vec4 rgbaDepth) {
+
+            const vec4 bitShift = vec4(1.0, 1.0/256.0, 1.0/(256.0*256.0), 1.0/(256.0*256.0*256.0));
+
+            return dot(rgbaDepth, bitShift);
+
+        }
+
+
+
+        // Fungsi noise (hash)
+
+        float random(vec2 st) {
+
+            return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
+
+        }
+
+
+
+        //  Fungsi FBM (Fractal Brownian Motion) untuk tekstur yang lebih baik
+
+        float fbm(vec2 st) {
+
+            float value = 0.0;
+
+            float amplitude = 0.5;
+
+            float frequency = 2.0; // Frekuensi awal untuk detail
+
+            for (int i = 0; i < 3; i++) { // 3 oktaf
+
+                value += amplitude * random(st * frequency);
+
+                frequency *= 2.0;
+
+                amplitude *= 0.5;
+
+            }
+
+            return value;
+
+        }
+
+
+
+        void main() {
+
+            vec3 objectColor = u_objectColor;
+            if (u_useVertexColor) {
+            objectColor = v_color;
+            }
+
+            if (u_isGround) {
+                float groundNoise = fbm(v_worldPosition.xz * 0.05); // Skala lebih besar
+                vec3 groundColor1 = vec3(0.4, 0.7, 0.25); // Hijau cerah
+                vec3 groundColor2 = vec3(0.3, 0.5, 0.15); // Hijau tanah
+                vec3 groundColor3 = vec3(0.2, 0.3, 0.1); // Tanah gelap
+                // Campur 3 warna
+
+                objectColor = mix(groundColor2, groundColor1, smoothstep(0.3, 0.7, groundNoise));
+                objectColor = mix(groundColor3, objectColor, smoothstep(0.1, 0.4, groundNoise));
+
+            } else if (u_isGrass) {
+
+                float noise = fbm(v_worldPosition.xz * 0.8); // Skala lebih kecil
+
+                vec3 grassColor1 = vec3(0.25, 0.6, 0.15);
+
+                vec3 grassColor2 = vec3(0.35, 0.75, 0.25);
+
+                objectColor = mix(grassColor1, grassColor2, noise);
+
+            }
+
+
+
+            vec3 normal = normalize(v_normal);
+
+            vec3 lightDir = normalize(u_lightDirection);
+
+            vec3 viewDir = normalize(u_viewPosition - v_worldPosition);
+
+            
+
+            vec3 lightSpaceCoord = v_positionFromLight.xyz / v_positionFromLight.w;
+
+            vec2 shadowTexCoord = lightSpaceCoord.xy * 0.5 + 0.5;
+
+            
+
+            //  UPGRADE: PCF Soft Shadows 
+
+            float shadow = 0.0;
+
+            float bias = 0.005; 
+
+            vec2 texelSize = 1.0 / u_shadowMapSize;
+
+            float currentDepth = lightSpaceCoord.z;
+
+
+
+            if (shadowTexCoord.x <= 0.0 || shadowTexCoord.x >= 1.0 || shadowTexCoord.y <= 0.0 || shadowTexCoord.y >= 1.0) {
+
+                 shadow = 1.0; // Di luar frustum, tidak ada bayangan
+
+            } else {
+
+                 for (int x = -1; x <= 1; x++) {
+
+                     for (int y = -1; y <= 1; y++) {
+
+                         float pcfDepth = unpackDepth(texture2D(u_shadowMap, shadowTexCoord + vec2(x, y) * texelSize));
+
+                         shadow += (currentDepth - bias < pcfDepth) ? 1.0 : 0.0;
+
+                     }
+
+                 }
+
+                 shadow /= 9.0;
+
+            }
+
+            //  Akhir Upgrade PCF 
+
+            
+
+            vec3 ambient = u_ambientLightColor * objectColor;
+
+            float diffuseFactor = max(dot(normal, lightDir), 0.0);
+
+            vec3 diffuse = diffuseFactor * u_lightColor * objectColor;
+
+            vec3 halfwayDir = normalize(lightDir + viewDir);
+
+            float specFactor = pow(max(dot(normal, halfwayDir), 0.0), u_shininess);
+
+            vec3 specular = specFactor * u_lightColor;
+
+            
+
+            vec3 finalColor = ambient + (diffuse + specular) * shadow;
+
+            // MATA PROFESIONAL - 3 LAYER DENGAN GRADIEN SMOOTH
+
+            if (u_isBody == true) {
+
+                vec3 pos = v_objectPosition;
+
+                float frontCheck = pos.z - (pos.x * pos.x * 0.25); 
+
+
+
+                if (frontCheck > 0.3) {
+
+                    // Definisi warna yang akurat
+
+                    vec3 yellowOuter = vec3(0.88, 0.82, 0.62);      // Kuning luar (ring)
+
+                    vec3 blackMiddle = vec3(0.08, 0.08, 0.08);      // Hitam (half circle bawah)
+
+                    vec3 yellowInner = vec3(0.92, 0.88, 0.72);      // Kuning dalam (atas)
+
+                    vec3 borderDark = vec3(0.08, 0.08, 0.08);       // Border gelap
+
+
+
+                    // Parameter mata yang lebih akurat
+
+                    float eye_y_center = -0.02;
+
+                    float eye_x_offset = 0.435;
+
+                    
+
+                    // Radius untuk setiap layer
+
+                    float outer_full_radius = 0.45;         // Batas luar total
+
+                    float outer_ring_inner = 0.3;          // Batas dalam ring kuning
+
+                    float black_half_radius = 0.9;         // Radius setengah lingkaran hitam
+
+                    float yellow_top_radius = 0.2;         // Radius kuning kecil atas
+
+                    
+
+                    // Ketebalan border
+
+                    float border_thickness = 0.015;
+
+
+
+                    vec2 pos_norm = vec2(pos.x, pos.y - eye_y_center);
+
+                    vec2 left_center = vec2(-eye_x_offset, 0.0);
+
+                    vec2 right_center = vec2(eye_x_offset, 0.0);
+
+
+
+                    // Lighting yang lebih soft
+
+                    float softLight = 0.88 + diffuseFactor * 0.12;
+
+                    
+
+                    vec3 litYellowOuter = yellowOuter * softLight;
+
+                    vec3 litBlackMiddle = blackMiddle * (0.95 + diffuseFactor * 0.25);
+
+                    vec3 litYellowInner = yellowInner * (0.96 + diffuseFactor * 0.04);
+
+                    vec3 litBorder = borderDark * (0.80 + diffuseFactor * 0.20);
+
+
+
+                    //  MATA KIRI 
+
+                    float left_dist = length(pos_norm - left_center);
+
+                    float left_contribution = 0.0;
+
+                    
+
+                    // 1. Outer ring kuning (antara outer_full_radius dan outer_ring_inner)
+
+                    if (left_dist <= outer_full_radius) {
+
+                        // Border luar
+
+                        if (left_dist > outer_full_radius - border_thickness) {
+
+                            float border_alpha = smoothstep(outer_full_radius, outer_full_radius - border_thickness, left_dist);
+
+                            finalColor = mix(finalColor, litBorder, border_alpha);
+
+                        }
+
+                        // Ring kuning
+
+                        else if (left_dist > outer_ring_inner) {
+
+                            finalColor = litYellowOuter;
+
+                        }
+
+                        // Border inner ring
+
+                        else if (left_dist > outer_ring_inner - border_thickness) {
+
+                            float border_alpha = smoothstep(outer_ring_inner - border_thickness, outer_ring_inner, left_dist);
+
+                            finalColor = mix(litBorder, litYellowOuter, border_alpha);
+
+                        }
+
+                        // Area dalam ring
+
+                        else {
+
+                            finalColor = litBlackMiddle;
+
+                            
+
+                            // 2. Setengah lingkaran hitam (hanya bagian bawah)
+
+                            float y_offset = pos_norm.y - left_center.y;
+
+                            
+
+                            if (y_offset <= 0.0 && left_dist <= black_half_radius) {
+
+                                // Transisi smooth dari border ke hitam
+
+                                float black_alpha = smoothstep(black_half_radius + 0.5, black_half_radius - 0.02, left_dist);
+
+                                
+
+                                // Gradient vertikal untuk transisi halus di edge atas
+
+                                float vertical_fade = smoothstep(-0.02, -0.08, y_offset);
+
+                                black_alpha *= vertical_fade;
+
+                                finalColor = mix(finalColor, litBlackMiddle, black_alpha);
+
+                            }
+
+                            
+
+                            // 3. Kuning kecil di atas (highlight)
+
+                            vec2 top_highlight_center = left_center + vec2(0.0, 0.14);
+
+                            float top_dist = length(pos_norm - top_highlight_center);
+
+                            
+
+                            if (top_dist <= yellow_top_radius) {
+
+                                float highlight_alpha = smoothstep(yellow_top_radius + 0.02, yellow_top_radius - 0.02, top_dist);
+
+                                finalColor = mix(finalColor, litYellowInner, highlight_alpha);
+
+                            }
+
+                        }
+
+                    }
+
+
+
+                    //  MATA KANAN 
+
+                    float right_dist = length(pos_norm - right_center);
+
+                    
+
+                    // 1. Outer ring kuning
+
+                    if (right_dist <= outer_full_radius) {
+
+                        // Border luar
+
+                        if (right_dist > outer_full_radius - border_thickness) {
+
+                            float border_alpha = smoothstep(outer_full_radius, outer_full_radius - border_thickness, right_dist);
+
+                            finalColor = mix(finalColor, litBorder, border_alpha);
+
+                        }
+
+                        // Ring kuning
+
+                        else if (right_dist > outer_ring_inner) {
+
+                            finalColor = litYellowOuter;
+
+                        }
+
+                        // Border inner ring
+
+                        else if (right_dist > outer_ring_inner - border_thickness) {
+
+                            float border_alpha = smoothstep(outer_ring_inner - border_thickness, outer_ring_inner, right_dist);
+
+                            finalColor = mix(litBorder, litYellowOuter, border_alpha);
+
+                        }
+
+                        // Area dalam ring
+
+                        else {
+
+                            finalColor = litBlackMiddle; 
+
+                            // 2. Setengah lingkaran hitam (hanya bagian bawah)
+
+                            float y_offset = pos_norm.y - right_center.y;
+
+                            
+
+                            if (y_offset <= 0.0 && right_dist <= black_half_radius) {
+
+                                float black_alpha = smoothstep(black_half_radius + 0.03, black_half_radius - 0.02, right_dist);
+
+                                float vertical_fade = smoothstep(-0.02, -0.08, y_offset);
+
+                                black_alpha *= vertical_fade;
+
+                                finalColor = mix(finalColor, litBlackMiddle, black_alpha);
+
+                            }
+
+                            
+
+                            // 3. Kuning kecil di atas
+
+                            vec2 top_highlight_center = right_center + vec2(0.0, 0.14);
+
+                            float top_dist = length(pos_norm - top_highlight_center);
+
+                            
+
+                            if (top_dist <= yellow_top_radius) {
+
+                                float highlight_alpha = smoothstep(yellow_top_radius + 0.02, yellow_top_radius - 0.02, top_dist);
+
+                                finalColor = mix(finalColor, litYellowInner, highlight_alpha);
+
+                            }
+
+                        }
+
+                    }
+
+
+
+                    
+
+                }
+
+            }
+
+
+
+
+
+
+
+
+
+            float dist = length(v_worldPosition - u_viewPosition);
+
+            float fogFactor = exp(-u_fogDensity * u_fogDensity * dist * dist);
+
+            fogFactor = clamp(fogFactor, 0.0, 1.0);
+
+            vec3 finalFogColor = mix(u_fogColor, finalColor, fogFactor);
+
+
+
+            //  : Efek Vignette 
+
+            float vignette = distance(v_screenCoord.xy, vec2(0.0, 0.0));
+
+            vignette = 1.0 - smoothstep(0.6, 1.2, vignette) * 0.35; // 0.35 = kekuatan
+
+            
+
+            gl_FragColor = vec4(finalFogColor * vignette, 1.0);
+
+        }
+
+    </script>
+
+
+
+    <script id="water-vertex-shader" type="x-shader/x-vertex">
+
+        attribute vec4 a_position;
+
+        uniform mat4 u_projectionMatrix;
+
+        uniform mat4 u_viewMatrix;
+
+        uniform mat4 u_modelMatrix;
+
+        uniform float u_time;
+
+
+
+        varying vec3 v_worldPosition;
+
+        varying vec3 v_normal;
+
+
+
+        void main() {
+
+            vec4 worldPos = u_modelMatrix * a_position;
+
+            
+
+            // Gerakan ombak sederhana
+
+            float displacement = sin(worldPos.x * 0.5 + u_time * 2.0) * 0.1 + cos(worldPos.z * 0.5 + u_time * 2.0) * 0.1;
+
+            worldPos.y += displacement;
+
+            
+
+            v_worldPosition = worldPos.xyz;
+
+            // Kalkulasi normal ombak secara kasar untuk efek cahaya
+
+            float dx = 0.5 * cos(worldPos.x * 0.5 + u_time * 2.0) * 0.1;
+
+            float dz = -0.5 * sin(worldPos.z * 0.5 + u_time * 2.0) * 0.1;
+
+            v_normal = normalize(vec3(-dx, 1.0, -dz));
+
+            
+
+            gl_Position = u_projectionMatrix * u_viewMatrix * worldPos;
+
+        }
+
+    </script>
+
+    <script id="water-fragment-shader" type="x-shader/x-fragment">
+
+        precision mediump float;
+
+        uniform vec3 u_viewPosition;
+
+        uniform vec3 u_lightDirection;
+
+        uniform vec3 u_lightColor;
+
+        uniform vec3 u_fogColor; // 
+
+        uniform vec3 u_ambientLight; // 
+
+        uniform sampler2D u_skyboxTexture;
+
+
+
+        varying vec3 v_worldPosition;
+
+        varying vec3 v_normal;
+
+
+
+        const vec2 invAtan = vec2(0.1591, 0.3183);
+
+
+
+        void main() {
+
+            vec3 normal = normalize(v_normal);
+
+            vec3 viewDir = normalize(u_viewPosition - v_worldPosition);
+
+            
+
+            // Refleksi Skybox
+
+            vec3 reflectDir = reflect(-viewDir, normal);
+
+             vec2 uv_offset = normal.xz * 0.05; // Distorsi berdasarkan normal ombak
+
+            vec2 uv = vec2(atan(reflectDir.z, reflectDir.x), asin(reflectDir.y));
+
+            uv *= invAtan;
+
+            uv.x += 0.5;
+
+            uv.y += 0.5;
+
+            uv.x = 1.0 - uv.x;
+
+            vec3 reflectionColor = texture2D(u_skyboxTexture, uv + uv_offset).rgb;
+
+            
+
+            // Efek Fresnel untuk menggabungkan refleksi dan warna air
+
+            float fresnel = 0.02 + 0.98 * pow(1.0 - dot(viewDir, normal), 5.0);
+
+            
+
+            // UPGRADE: Warna air dipengaruhi ambient light
+
+            vec3 waterColor = vec3(0.1, 0.25, 0.4) * u_ambientLight * 1.5;
+
+            
+
+            // Cahaya Specular dari matahari
+
+            vec3 lightDir = normalize(u_lightDirection);
+
+            vec3 halfwayDir = normalize(lightDir + viewDir);
+
+            float specFactor = pow(max(dot(normal, halfwayDir), 0.0), 64.0);
+
+            vec3 specular = specFactor * u_lightColor * 2.0;
+
+
+
+            vec3 finalColor = mix(waterColor, reflectionColor, fresnel) + specular;
+
+
+
+            // : Terapkan Fog
+
+            float dist = length(v_worldPosition - u_viewPosition);
+
+            float fogFactor = exp(-0.015 * 0.015 * dist * dist); // Density sama dgn main shader
+
+            fogFactor = clamp(fogFactor, 0.0, 1.0);
+
+            vec3 finalFogColor = mix(u_fogColor, finalColor, fogFactor);
+
+
+
+            gl_FragColor = vec4(finalFogColor, 0.85);
+
+        }
+
+    </script>
+
+
+
+    <script id="firefly-vertex-shader" type="x-shader/x-vertex">
+
+        attribute vec4 a_position;
+
+        attribute float a_offset;
+
+        uniform mat4 u_viewMatrix;
+
+        uniform mat4 u_projectionMatrix;
+
+        uniform float u_time;
+
+        
+
+        varying float v_alpha;
+
+
+
+        void main() {
+
+            vec3 pos = a_position.xyz;
+
+            pos.y += sin(u_time * 0.5 + a_offset * 10.0) * 0.8;
+
+            pos.x += cos(u_time * 0.4 + a_offset * 8.0) * 0.6;
+
+            
+
+            gl_Position = u_projectionMatrix * u_viewMatrix * vec4(pos, 1.0);
+
+            
+
+            gl_PointSize = (sin(u_time + a_offset * 12.0) + 1.5) * 4.0;
+
+            
+
+            v_alpha = (sin(u_time * 2.0 + a_offset * 15.0) + 1.0) / 2.0 * 0.8 + 0.2;
+
+        }
+
+    </script>
+
+    <script id="firefly-fragment-shader" type="x-shader/x-fragment">
+
+        precision mediump float;
+
+        varying float v_alpha;
+
+
+
+        void main() {
+
+            float dist = distance(gl_PointCoord, vec2(0.5, 0.5));
+
+            if (dist > 0.5) {
+
+                discard;
+
+            }
+
+            vec3 color = vec3(0.7, 1.0, 0.3); 
+
+            gl_FragColor = vec4(color, (1.0 - dist * 2.0) * v_alpha);
+
+        }
+
+    </script>
+
+
+
+    <script id="cloud-vertex-shader" type="x-shader/x-vertex">
+
+        attribute vec4 a_position;
+
+        attribute float a_offset;
+
+        uniform mat4 u_viewMatrix;
+
+        uniform mat4 u_projectionMatrix;
+
+        uniform float u_time;
+
+        
+
+        varying float v_noiseFactor;
+
+
+
+        float hash(float n) { return fract(sin(n) * 43758.5453123); }
+
+        float noise(vec3 x) {
+
+            vec3 p = floor(x);
+
+            vec3 f = fract(x);
+
+            f = f * f * (3.0 - 2.0 * f);
+
+            float n = p.x + p.y * 157.0 + p.z * 113.0;
+
+            return mix(mix(mix(hash(n + 0.0), hash(n + 1.0), f.x),
+
+                           mix(hash(n + 157.0), hash(n + 158.0), f.x), f.y),
+
+                       mix(mix(hash(n + 113.0), hash(n + 114.0), f.x),
+
+                           mix(hash(n + 270.0), hash(n + 271.0), f.x), f.y), f.z);
+
+        }
+
+
+
+        void main() {
+
+            vec3 pos = a_position.xyz;
+
+            pos.x += u_time * 5.0 * a_offset; 
+
+            pos.z += u_time * 2.0 * (1.0 - a_offset); 
+
+            
+
+            pos.y += sin(u_time * 0.1 + a_offset * 5.0) * 0.5;
+
+
+
+            v_noiseFactor = noise(pos * 0.1 + vec3(u_time * 0.05)) + noise(pos * 0.05 + vec3(u_time * 0.02)) * 0.5;
+
+            v_noiseFactor = smoothstep(0.4, 0.7, v_noiseFactor); 
+
+
+
+            gl_Position = u_projectionMatrix * u_viewMatrix * vec4(pos, 1.0);
+
+            gl_PointSize = 15.0 + v_noiseFactor * 20.0; 
+
+        }
+
+    </script>
+
+    <script id="cloud-fragment-shader" type="x-shader/x-fragment">
+
+        precision mediump float;
+
+        varying float v_noiseFactor;
+
+
+
+        void main() {
+
+            float dist = distance(gl_PointCoord, vec2(0.5, 0.5));
+
+            float alpha = (1.0 - dist * 2.0); 
+
+            alpha *= v_noiseFactor; 
+
+            
+
+            if (alpha < 0.1) {
+
+                discard;
+
+            }
+
+            gl_FragColor = vec4(1.0, 1.0, 1.0, alpha * 0.7); 
+
+        }
+
+    </script>
+
+
+
+
+
+    <script id="skybox-vertex-shader" type="x-shader/x-vertex">
+
+      attribute vec4 a_position;
+
+      uniform mat4 u_projectionMatrix;
+
+      uniform mat4 u_viewMatrix;
+
+      varying vec3 v_texCoord;
+
+      void main() {
+
+        v_texCoord = a_position.xyz;
+
+        mat4 viewRotationOnly = mat4(mat3(u_viewMatrix));
+
+        gl_Position = (u_projectionMatrix * viewRotationOnly * a_position).xyww;
+
+      }
+
+    </script>
+
+    <script id="skybox-fragment-shader" type="x-shader/x-fragment">
+
+        precision mediump float;
+
+        uniform sampler2D u_skyboxTexture;
+
+        uniform vec3 u_sunDirection;
+
+        uniform vec3 u_sunColor; // : Warna matahari dinamis
+
+        uniform vec3 u_horizonColor; // : Warna horizon dinamis
+
+        varying vec3 v_texCoord;
+
+        const vec2 invAtan = vec2(0.1591, 0.3183);
+
+
+
+        void main() {
+
+            vec3 dir = normalize(v_texCoord);
+
+            vec2 uv = vec2(atan(dir.z, dir.x), asin(dir.y));
+
+            uv *= invAtan;
+
+            uv.x += 0.5;
+
+            uv.y += 0.5;
+
+            uv.x = 1.0 - uv.x;
+
+            vec4 skyColor = texture2D(u_skyboxTexture, uv);
+
+
+
+            //  UPGRADE: TINTING LANGIT 
+
+            float sunElevation = normalize(u_sunDirection).y;
+
+            float sunsetFactor = 1.0 - smoothstep(0.0, 0.2, sunElevation);
+
+            
+
+            // Warna tinting
+
+            vec3 daySkyTint = vec3(0.6, 0.8, 1.0);
+
+            vec3 sunsetSkyTint = u_horizonColor * 1.2 + 0.3; // Dibuat lebih cerah
+
+            
+
+            vec3 skyTint = mix(daySkyTint, sunsetSkyTint, sunsetFactor);
+
+            
+
+            // Padukan tint dengan skybox (75% tint, 25% asli)
+
+            vec3 tintedSky = mix(skyColor.rgb, skyColor.rgb * skyTint, 0.75);
+
+
+
+            // -- Render Matahari --
+
+            float sunDot = dot(dir, normalize(u_sunDirection));
+
+            float sunDisc = smoothstep(0.999, 0.9995, sunDot);
+
+            float sunGlow = smoothstep(0.97, 1.0, sunDot);
+
+            
+
+            vec4 finalColor = vec4(tintedSky, 1.0);
+
+            // Gabungkan dengan matahari prosedural
+
+            finalColor = mix(finalColor, vec4(u_sunColor, 1.0), sunDisc);
+
+            finalColor.rgb += u_sunColor * pow(sunGlow, 15.0) * 0.5; 
+
+            
+
+            gl_FragColor = finalColor;
+
+        }
+
+    </script>
+
+
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
+    <script src="shiftry_geometry.js"></script>
+    <script src="nuzleaf_geometry.js"></script>
+
+    <script>
+
+        'use strict';
+
+
+
+        const PerlinNoise = new function () {
+
+            const p = new Uint8Array(512);
+
+            for (let i = 0; i < 256; i++) p[i] = i;
+
+            for (let i = 255; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[p[i], p[j]] = [p[j], p[i]]; }
+
+            for (let i = 0; i < 256; i++) p[i + 256] = p[i];
+
+            const fade = t => t * t * t * (t * (t * 6 - 15) + 10);
+
+            const lerp = (t, a, b) => a + t * (b - a);
+
+            const grad = (h, x, y, z) => { const u = h < 8 ? x : y, v = h < 4 ? y : h === 12 || h === 14 ? x : z; return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v); };
+
+            this.noise = (x, y, z = 0) => {
+
+                const X = Math.floor(x) & 255, Y = Math.floor(y) & 255, Z = Math.floor(z) & 255;
+
+                x -= Math.floor(x); y -= Math.floor(y); z -= Math.floor(z);
+
+                const u = fade(x), v = fade(y), w = fade(z);
+
+                const A = p[X] + Y, AA = p[A] + Z, AB = p[A + 1] + Z, B = p[X + 1] + Y, BA = p[B] + Z, BB = p[B + 1] + Z;
+
+                return lerp(w, lerp(v, lerp(u, grad(p[AA], x, y, z), grad(p[BA], x - 1, y, z)), lerp(u, grad(p[AB], x, y - 1, z), grad(p[BB], x - 1, y - 1, z))),
+
+                    lerp(v, lerp(u, grad(p[AA + 1], x, y, z - 1), grad(p[BA + 1], x - 1, y, z - 1)), lerp(u, grad(p[AB + 1], x, y - 1, z - 1), grad(p[BB + 1], x - 1, y - 1, z - 1))));
+
+            };
+
+        }
+
+
+
+        const RIVER_BED = -4.5;
+
+        const RIVER_WIDTH = 12.0;
+
+
+
+        function getRiverInfluence(x, z) {
+
+            const riverPathX = Math.sin(z * 0.05) * 20.0;
+
+            const dist = Math.abs(x - riverPathX);
+
+            return Math.min(dist / RIVER_WIDTH, 1.0);
+
+        }
+
+
+
+        function getGroundHeight(x, z) {
+
+            let height = 0;
+
+            const frequency = 0.015, amplitude = 8.0;
+
+            height += PerlinNoise.noise(x * frequency, z * frequency) * amplitude;
+
+            height += PerlinNoise.noise(x * frequency * 2, z * frequency * 2) * amplitude / 2;
+
+            height += PerlinNoise.noise(x * frequency * 4, z * frequency * 4) * amplitude / 4;
+
+            height -= 2.0;
+
+
+
+            const riverInfluence = getRiverInfluence(x, z);
+
+            const smoothedInfluence = 3 * riverInfluence * riverInfluence - 2 * riverInfluence * riverInfluence * riverInfluence; // Smoothstep
+
+            return lerp(RIVER_BED, height, smoothedInfluence);
+
+        }
+
+        const NUZLEAF_COLORS = {
+            BODY: [0.54, 0.45, 0.36],
+            SKIN: [0.93, 0.84, 0.73],
+            LEAF: [0.4, 0.65, 0.29],
+            DIAPER: [0.95, 0.95, 0.85],
+            DIAPER_STRIP: [0.4, 0.4, 0.4],
+            EYE_WHITE: [1.0, 1.0, 1.0],
+            EYE_PUPIL: [0.1, 0.1, 0.1],
+            MOUTH: [0.8, 0.5, 0.5],
+            HEAD_STRIP: [0.1, 0.1, 0.1]
+        };
+
+
+
+        function main() {
+
+            const canvas = document.querySelector("#glCanvas");
+
+            const gl = canvas.getContext("webgl", { antialias: true });
+
+            if (!gl) { alert("WebGL tidak didukung."); return; }
+
+            if (!gl.getExtension('WEBGL_depth_texture')) { alert('Ekstensi WEBGL_depth_texture tidak didukung!'); return; }
+
+            gl.getExtension('OES_standard_derivatives');
+
+
+            const mainShaderProgram = initShaderProgram(gl, document.querySelector("#vertex-shader").text, document.querySelector("#fragment-shader").text);
+
+            const shadowShaderProgram = initShaderProgram(gl, document.querySelector("#shadow-vertex-shader").text, document.querySelector("#shadow-fragment-shader").text);
+
+            const skyboxShaderProgram = initShaderProgram(gl, document.querySelector("#skybox-vertex-shader").text, document.querySelector("#skybox-fragment-shader").text);
+
+            const waterShaderProgram = initShaderProgram(gl, document.querySelector("#water-vertex-shader").text, document.querySelector("#water-fragment-shader").text);
+
+            const fireflyShaderProgram = initShaderProgram(gl, document.querySelector("#firefly-vertex-shader").text, document.querySelector("#firefly-fragment-shader").text);
+
+            const cloudShaderProgram = initShaderProgram(gl, document.querySelector("#cloud-vertex-shader").text, document.querySelector("#cloud-fragment-shader").text);
+
+            const programInfo = {
+
+                main: {
+
+                    program: mainShaderProgram,
+
+                    attribLocations: { vertexPosition: gl.getAttribLocation(mainShaderProgram, 'a_position'), vertexNormal: gl.getAttribLocation(mainShaderProgram, 'a_normal'), color: gl.getAttribLocation(mainShaderProgram, 'a_color') },
+
+                    uniformLocations: {
+
+                        projectionMatrix: gl.getUniformLocation(mainShaderProgram, 'u_projectionMatrix'),
+
+                        viewMatrix: gl.getUniformLocation(mainShaderProgram, 'u_viewMatrix'),
+
+                        modelMatrix: gl.getUniformLocation(mainShaderProgram, 'u_modelMatrix'),
+
+                        lightViewMatrix: gl.getUniformLocation(mainShaderProgram, 'u_lightViewMatrix'),
+
+                        lightProjectionMatrix: gl.getUniformLocation(mainShaderProgram, 'u_lightProjectionMatrix'),
+
+                        objectColor: gl.getUniformLocation(mainShaderProgram, 'u_objectColor'),
+
+                        lightDirection: gl.getUniformLocation(mainShaderProgram, 'u_lightDirection'),
+
+                        lightColor: gl.getUniformLocation(mainShaderProgram, 'u_lightColor'),
+
+                        ambientLightColor: gl.getUniformLocation(mainShaderProgram, 'u_ambientLightColor'),
+
+                        viewPosition: gl.getUniformLocation(mainShaderProgram, 'u_viewPosition'),
+
+                        shininess: gl.getUniformLocation(mainShaderProgram, 'u_shininess'),
+
+                        fogColor: gl.getUniformLocation(mainShaderProgram, 'u_fogColor'),
+
+                        fogDensity: gl.getUniformLocation(mainShaderProgram, 'u_fogDensity'),
+
+                        shadowMap: gl.getUniformLocation(mainShaderProgram, 'u_shadowMap'),
+
+                        shadowMapSize: gl.getUniformLocation(mainShaderProgram, 'u_shadowMapSize'),
+
+                        isGrass: gl.getUniformLocation(mainShaderProgram, 'u_isGrass'),
+
+                        isGround: gl.getUniformLocation(mainShaderProgram, 'u_isGround'),
+
+                        isBody: gl.getUniformLocation(mainShaderProgram, 'u_isBody'),
+
+                        useVertexColor: gl.getUniformLocation(mainShaderProgram, 'u_useVertexColor')
+
+                    }
+                },
+
+                shadow: {
+
+                    program: shadowShaderProgram,
+
+                    attribLocations: { vertexPosition: gl.getAttribLocation(shadowShaderProgram, 'a_position') },
+
+                    uniformLocations: {
+
+                        modelMatrix: gl.getUniformLocation(shadowShaderProgram, 'u_modelMatrix'),
+
+                        lightViewMatrix: gl.getUniformLocation(shadowShaderProgram, 'u_lightViewMatrix'),
+
+                        lightProjectionMatrix: gl.getUniformLocation(shadowShaderProgram, 'u_lightProjectionMatrix')
+
+                    }
+
+                },
+
+                skybox: {
+
+                    program: skyboxShaderProgram,
+
+                    attribLocations: { vertexPosition: gl.getAttribLocation(skyboxShaderProgram, 'a_position') },
+
+                    uniformLocations: {
+
+                        projectionMatrix: gl.getUniformLocation(skyboxShaderProgram, 'u_projectionMatrix'),
+
+                        viewMatrix: gl.getUniformLocation(skyboxShaderProgram, 'u_viewMatrix'),
+
+                        skyboxTexture: gl.getUniformLocation(skyboxShaderProgram, 'u_skyboxTexture'),
+
+                        sunDirection: gl.getUniformLocation(skyboxShaderProgram, 'u_sunDirection'),
+
+                        sunColor: gl.getUniformLocation(skyboxShaderProgram, 'u_sunColor'),
+
+                        horizonColor: gl.getUniformLocation(skyboxShaderProgram, 'u_horizonColor')
+
+                    }
+
+                },
+
+                water: {
+
+                    program: waterShaderProgram,
+
+                    attribLocations: { vertexPosition: gl.getAttribLocation(waterShaderProgram, 'a_position') },
+
+                    uniformLocations: {
+
+                        projectionMatrix: gl.getUniformLocation(waterShaderProgram, 'u_projectionMatrix'),
+
+                        viewMatrix: gl.getUniformLocation(waterShaderProgram, 'u_viewMatrix'),
+
+                        modelMatrix: gl.getUniformLocation(waterShaderProgram, 'u_modelMatrix'),
+
+                        time: gl.getUniformLocation(waterShaderProgram, 'u_time'),
+
+                        viewPosition: gl.getUniformLocation(waterShaderProgram, 'u_viewPosition'),
+
+                        lightDirection: gl.getUniformLocation(waterShaderProgram, 'u_lightDirection'),
+
+                        lightColor: gl.getUniformLocation(waterShaderProgram, 'u_lightColor'),
+
+                        skyboxTexture: gl.getUniformLocation(waterShaderProgram, 'u_skyboxTexture'),
+
+                        fogColor: gl.getUniformLocation(waterShaderProgram, 'u_fogColor'),
+
+                        ambientLight: gl.getUniformLocation(waterShaderProgram, 'u_ambientLight')
+
+                    }
+                },
+
+                firefly: {
+
+                    program: fireflyShaderProgram,
+
+                    attribLocations: { vertexPosition: gl.getAttribLocation(fireflyShaderProgram, 'a_position'), offset: gl.getAttribLocation(fireflyShaderProgram, 'a_offset') },
+
+                    uniformLocations: {
+
+                        projectionMatrix: gl.getUniformLocation(fireflyShaderProgram, 'u_projectionMatrix'),
+
+                        viewMatrix: gl.getUniformLocation(fireflyShaderProgram, 'u_viewMatrix'),
+
+                        time: gl.getUniformLocation(fireflyShaderProgram, 'u_time')
+
+                    }
+
+                },
+
+                cloud: {
+
+                    program: cloudShaderProgram,
+
+                    attribLocations: { vertexPosition: gl.getAttribLocation(cloudShaderProgram, 'a_position'), offset: gl.getAttribLocation(cloudShaderProgram, 'a_offset') },
+
+                    uniformLocations: {
+
+                        projectionMatrix: gl.getUniformLocation(cloudShaderProgram, 'u_projectionMatrix'),
+
+                        viewMatrix: gl.getUniformLocation(cloudShaderProgram, 'u_viewMatrix'),
+
+                        time: gl.getUniformLocation(cloudShaderProgram, 'u_time')
+
+                    }
+
+                },
+
+            };
+
+
+
+            const shadowFramebufferInfo = initShadowFramebuffer(gl, 2048, 2048);
+
+            const skyboxTexture = loadTexture(gl, 'sky.jpg');
+
+
+
+            const seedotGeometries = createSeedotGeometry();
+
+            const environmentGeometries = createEnvironmentGeometry();
+
+            const nuzleafGeometries = createNuzleafGeometryData();
+
+            const buffers = {
+
+                hat: initBuffers(gl, seedotGeometries.hat),
+
+                body: initBuffers(gl, seedotGeometries.body),
+
+                foot: initBuffers(gl, seedotGeometries.foot),
+
+                eyeOuter: initBuffers(gl, seedotGeometries.eyeOuter),
+
+                eyePupil: initBuffers(gl, seedotGeometries.eyePupil),
+
+                eyeHighlight: initBuffers(gl, seedotGeometries.eyeHighlight),
+
+                ground: initBuffers(gl, environmentGeometries.ground),
+
+                water: initBuffers(gl, environmentGeometries.water),
+
+                treeTrunk: initBuffers(gl, environmentGeometries.tree.trunk),
+
+                treeCanopy: initBuffers(gl, environmentGeometries.tree.canopy),
+
+                pineTrunk: initBuffers(gl, environmentGeometries.pineTree.trunk),
+
+                pineCanopy: initBuffers(gl, environmentGeometries.pineTree.canopy),
+
+                rock: initBuffers(gl, environmentGeometries.rock),
+
+                grass: initBuffers(gl, environmentGeometries.grass),
+
+                fireflies: initFireflyBuffers(gl, environmentGeometries.fireflies),
+
+                clouds: initCloudBuffers(gl, environmentGeometries.clouds),
+
+                houseBody: initBuffers(gl, environmentGeometries.house.body),
+
+                houseRoof: initBuffers(gl, environmentGeometries.house.roof),
+
+                houseDoor: initBuffers(gl, environmentGeometries.house.door),
+
+                houseWindow: initBuffers(gl, environmentGeometries.house.window),
+
+                houseChimney: initBuffers(gl, environmentGeometries.house.chimney),
+
+                skybox: initBuffers(gl, environmentGeometries.skybox),
+                shiftryBody: initBuffersWithColor(gl, window.shiftryGeometries.body),
+                shiftryShoulder: initBuffersWithColor(gl, window.shiftryGeometries.shoulder),
+                shiftryArmLeft: initBuffersWithColor(gl, window.shiftryGeometries.armLeft),
+                shiftryArmRight: initBuffersWithColor(gl, window.shiftryGeometries.armRight),
+                razorLeaf: initBuffersWithColor(gl, window.shiftryGeometries.razorLeaf),
+                darkPulse: initBuffersWithColor(gl, window.shiftryGeometries.darkPulse),
+                leafStorm: initBuffersWithColor(gl, window.shiftryGeometries.leafStorm),
+                sword: initBuffersWithColor(gl, window.shiftryGeometries.sword),
+                nuzleafHead: initBuffers(gl, nuzleafGeometries.head),
+                nuzleafBody: initBuffers(gl, nuzleafGeometries.body),
+                nuzleafNose: initBuffers(gl, nuzleafGeometries.nose),
+                nuzleafArm: initBuffers(gl, nuzleafGeometries.arm),
+                nuzleafHand: initBuffers(gl, nuzleafGeometries.hand),
+                nuzleafLeg: initBuffers(gl, nuzleafGeometries.leg),
+                nuzleafFoot: initBuffers(gl, nuzleafGeometries.foot),
+                nuzleafDiaperHalf: initBuffers(gl, nuzleafGeometries.diaperHalf),
+                nuzleafMouth: initBuffers(gl, nuzleafGeometries.mouth),
+                nuzleafLeafStem: initBuffers(gl, nuzleafGeometries.leafStem),
+                nuzleafLeafBlade: initBuffers(gl, nuzleafGeometries.leafBlade),
+                nuzleafLeftEye: initBuffers(gl, nuzleafGeometries.leftEye),
+                nuzleafRightEye: initBuffers(gl, nuzleafGeometries.rightEye),
+                nuzleafEyePupil: initBuffers(gl, nuzleafGeometries.eyePupil),
+                nuzleafEyePupilWhite: initBuffers(gl, nuzleafGeometries.eyePupilWhite),
+                nuzleafDiaperStrip: initBuffers(gl, nuzleafGeometries.diaperStrip),
+                nuzleafHeadStrip: initBuffers(gl, nuzleafGeometries.headStrip)
+            };
+
+
+
+            const treePositions = [];
+
+            const numTrees = 800, groundSize = 150, treeNoiseScale = 0.05;
+
+            for (let i = 0; i < numTrees; i++) {
+
+                const x = (Math.random() - 0.5) * groundSize;
+
+                const z = (Math.random() - 0.5) * groundSize;
+
+                const noiseVal = (PerlinNoise.noise(x * treeNoiseScale, z * treeNoiseScale) + 1) / 2;
+
+                if (noiseVal < 0.4 || getRiverInfluence(x, z) < 0.8) { continue; }
+
+                if (Math.sqrt(x * x + z * z) < 20) { continue; }
+
+                const y = getGroundHeight(x, z);
+
+                if (y < -2.5) { continue; }
+
+                const scale = (Math.random() * 0.4 + 0.8) * (noiseVal * 1.2);
+
+                const rotation = Math.random() * Math.PI * 2;
+
+                const type = Math.random() > 0.6 ? 'pine' : 'deciduous';
+
+                treePositions.push({ position: [x, y, z], scale, rotation, radius: (type === 'pine' ? 1.5 : 2.0) * scale, type });
+
+            }
+
+
+
+            const rockPositions = [];
+
+            const numRocks = 60;
+
+            for (let i = 0; i < numRocks; i++) {
+
+                const x = (Math.random() - 0.5) * groundSize;
+
+                const z = (Math.random() - 0.5) * groundSize;
+
+                if (getRiverInfluence(x, z) < 0.5) { continue; }
+
+                const y = getGroundHeight(x, z);
+
+                if (y < -1.5) { continue; }
+
+                const scale = Math.random() * 1.5 + 0.8;
+
+                rockPositions.push({ position: [x, y - 0.2, z], scale: [scale, scale * (Math.random() * 0.5 + 0.7), scale * (Math.random() * 0.5 + 0.7)], rotation: [Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI] });
+
+            }
+
+
+
+            const housePositions = [];
+
+            const numHouses = 5;
+
+            const minHouseDistance = 10;
+
+
+
+            for (let i = 0; i < numHouses; i++) {
+
+                let x, z, y;
+
+                let validPosition = false;
+
+                let attempts = 0;
+
+
+
+                while (!validPosition && attempts < 100) {
+
+                    attempts++;
+
+                    x = (Math.random() - 0.5) * groundSize * 0.8;
+
+                    z = (Math.random() - 0.5) * groundSize * 0.8;
+
+                    y = getGroundHeight(x, z);
+
+
+
+                    if (y > -1.0 && getRiverInfluence(x, z) > 0.9) {
+
+                        validPosition = true;
+
+
+
+                        for (const tree of treePositions) {
+
+                            const dx = x - tree.position[0];
+
+                            const dz = z - tree.position[2];
+
+                            if (Math.sqrt(dx * dx + dz * dz) < 4) {
+
+                                validPosition = false;
+
+                                break;
+
+                            }
+
+                        }
+
+                        if (!validPosition) continue;
+
+
+
+                        const seedotDx = x - 0;
+
+                        const seedotDz = z - (-5);
+
+                        if (Math.sqrt(seedotDx * seedotDx + seedotDz * seedotDz) < 10) {
+
+                            validPosition = false;
+
+                        }
+
+                        if (!validPosition) continue;
+
+
+
+                        for (const existingHouse of housePositions) {
+
+                            const dx = x - existingHouse.position[0];
+
+                            const dz = z - existingHouse.position[2];
+
+                            if (Math.sqrt(dx * dx + dz * dz) < minHouseDistance) {
+
+                                validPosition = false;
+
+                                break;
+
+                            }
+
+                        }
+
+
+
+                    }
+
+                }
+
+
+
+                if (attempts >= 100) {
+
+                    console.warn("Gagal menemukan posisi rumah yang valid setelah 100 percobaan.");
+
+                    continue;
+
+                }
+
+
+
+                const scale = Math.random() * 0.3 + 0.8;
+
+                const rotation = Math.random() * Math.PI * 2;
+
+                const yOffset = 2 * scale;
+
+                housePositions.push({ position: [x, y + yOffset, z], scale: [scale, scale, scale], rotation });
+
+            }
+
+
+
+            const seedotState = { position: [0, 0, -5], target: [0, -5], speed: 6.0, rotationY: 0, isMoving: false, waitTime: 1.0, waitTimer: 1.0,scale:1.0 };
+
+            const initialCameraX = 0, initialCameraZ = 15;
+
+            const initialGroundY = getGroundHeight(initialCameraX, initialCameraZ);
+
+            let cameraPosition = [initialCameraX, initialGroundY + 3.0, initialCameraZ];
+
+            let cameraYaw = -90.0, cameraPitch = -5.0;
+
+            let cameraFront = [0, 0, -1], cameraUp = [0, 1, 0];
+
+            let spectateTarget = null;
+
+            // STATE NUZLEAF 
+            const nuzleafInitialX = 5, nuzleafInitialZ = -5;
+            const nuzleafInitialY = getGroundHeight(nuzleafInitialX, nuzleafInitialZ); // Taruh di tanah dulu
+            let nuzleafState = { // Gunakan let jika akan diubah
+                position: [nuzleafInitialX, nuzleafInitialY, nuzleafInitialZ],
+                rotationY: -Math.PI / 4, // Arah hadap Nuzleaf
+                time: 0 // Untuk animasi idle
+                // Pivot Nuzleaf diasumsikan di tengah body (Y=0 lokal)
+            };
+
+
+            // STATE SHIFTRY DAN SKILL
+            const shiftryPosition = [-7, getGroundHeight(-7, 2) + 2.5, 2];
+            const shiftryScaleVec = [2.5, 2.5, 2.5];
+            const shiftryRotation = 20;
+            let shiftryBaseMatrix = createIdentityMatrix();
+            let leftArmMatrix = createIdentityMatrix();
+            let rightArmMatrix = createIdentityMatrix();
+            let shiftryArmAngle = 0;
+            let shiftryArmDir = 1;
+            let activeLeaves = [];
+            let activePulses = [];
+            let activeStorm = [];
+            let activeSwords = [];
+
+            const leafLifetime = 2.5;
+            const leafSpawnSpeed = 0.15;
+            const pulseLifetime = 1.7;
+            const pulseSpeed = 0.05;
+            const stormLifetime = 3.3;
+            const stormSpawnRate = 3;
+            let stormTimer = 0;
+            const swordsDanceDuration = 3;
+
+            let wantsToSpawnRazorLeaf = false;
+            let wantsToSpawnDarkPulse = false;
+            let wantsToSpawnLeafStorm = false;
+            let wantsToSpawnSwordsDance = false;
+
+            let sunAzimuth = 2.5, sunElevation = 0.6;
+
+            const keysPressed = {};
+
+            let soundInitialized = false;
+
+            let riverPanner;
+
+            let musicPlayer;
+
+
+            document.addEventListener('keydown', e => {
+                keysPressed[e.code] = true;
+
+                if (e.code === 'Digit1') wantsToSpawnRazorLeaf = true;
+                if (e.code === 'Digit2') wantsToSpawnDarkPulse = true;
+                if (e.code === 'Digit3') wantsToSpawnLeafStorm = true;
+                if (e.code === 'Digit4') wantsToSpawnSwordsDance = true;;
+
+                if (e.code === 'Digit7') {
+                    spectateTarget = 'seedot';
+
+                } else if (e.code === 'Digit8') {
+                    spectateTarget = 'nuzleaf';
+
+                } else if (e.code === 'Digit9') {
+                    spectateTarget = 'shiftry';
+
+                } else if (e.code === 'Digit0' || e.code === 'Escape') {
+                    spectateTarget = null;
+                }
+
+            });
+
+            document.addEventListener('keyup', e => keysPressed[e.code] = false);
+
+            canvas.addEventListener('click', () => {
+
+                canvas.requestPointerLock();
+
+                if (!soundInitialized) {
+                    initAudio();
+                }
+
+            });
+
+            let lastMouseX = -1;
+
+            canvas.addEventListener('mousemove', (e) => {
+
+                if (document.pointerLockElement !== canvas) return;
+
+                const sensitivity = 0.1; cameraYaw += e.movementX * sensitivity; cameraPitch -= e.movementY * sensitivity;
+
+                cameraPitch = Math.max(-89, Math.min(89, cameraPitch));
+
+                const yawRad = cameraYaw * Math.PI / 180, pitchRad = cameraPitch * Math.PI / 180;
+
+                cameraFront = normalizeVector([Math.cos(yawRad) * Math.cos(pitchRad), Math.sin(pitchRad), Math.sin(yawRad) * Math.cos(pitchRad)]);
+
+            });
+
+
+
+            async function initAudio() {
+
+                if (soundInitialized) return;
+
+                soundInitialized = true;
+
+                try {
+
+                    await Tone.start();
+
+                    console.log("Audio context dimulai.");
+
+
+
+                    musicPlayer = new Tone.Player({
+
+                        url: "pokemon.mp3",
+
+                        loop: true,
+
+                        autostart: false,
+
+                        volume: -12,
+
+
+
+                        onload: () => {
+
+                            console.log("Musik berhasil di-load dan akan diputar.");
+
+                            musicPlayer.start();
+
+                        },
+
+                        onerror: (err) => {
+
+                            console.error("Error loading audio file:", err);
+
+                        }
+
+                    }).toDestination();
+
+
+
+                } catch (e) {
+
+                    console.error("Gagal memulai Tone.js:", e);
+
+                    soundInitialized = false;
+
+                }
+
+            }
+
+            function spawnRazorLeaf() {
+                // Mtriks dasar badan
+                let baseTransform = createIdentityMatrix();
+                translate(baseTransform, shiftryPosition);
+                rotateY(baseTransform, shiftryRotation);
+
+                // Matriks bahu kiri (berdasarkan badan)
+                let shoulderLeftMat = Array.from(baseTransform);
+                translate(shoulderLeftMat, [2.5, 0, 0]); // Posisi bahu kiri lokal
+
+                // Matriks bahu kanan (berdasarkan badan)
+                let shoulderRightMat = Array.from(baseTransform);
+                translate(shoulderRightMat, [-2.5, 0, 0]); // Posisi bahu kanan lokal
+
+                // Ambil posisi world space dari pusat bahu
+                var shoulderPositions = [
+                    [shoulderLeftMat[12], shoulderLeftMat[13], shoulderLeftMat[14]],
+                    [shoulderRightMat[12], shoulderRightMat[13], shoulderRightMat[14]]
+                ];
+
+                // Dapatkan arah depan badan
+                // Gunakan baseTransform (hanya rotasi & translasi)
+                var modelForwardWorld = VEC3.transformMat4Normal([0, 0, 1.0], baseTransform); // Arah Z lokal
+                var modelForwardNorm = VEC3.normalize(modelForwardWorld);
+
+                // Jarak spawn awal dari bahu (agar tidak muncul tepat di dalam bahu)
+                const spawnOffsetDistance = 0.3;
+
+                for (var shoulderPos of shoulderPositions) {
+                    // Hitung posisi spawn sedikit di depan bahu
+                    var spawnPos = VEC3.add(shoulderPos, VEC3.scale(modelForwardNorm, spawnOffsetDistance));
+
+                    for (var i = 0; i < 20; i++) { // Jumlah daun per bahu
+                        var leafMatrix = LIBS.get_I4();
+                        // Set posisi awal daun
+                        LIBS.set_position(leafMatrix, spawnPos[0], spawnPos[1], spawnPos[2]);
+
+                        // Beri rotasi acak awal (opsional, agar terlihat natural)
+                        LIBS.rotateY(leafMatrix, Math.random() * Math.PI * 2);
+                        LIBS.rotateX(leafMatrix, (Math.random() - 0.5) * Math.PI * 0.5);
+
+                        // Kecepatan: Arah depan badan + sedikit sebaran acak
+                        var vel = VEC3.add(VEC3.scale(modelForwardNorm, leafSpawnSpeed * (1.0 + Math.random() * 0.2)), // Kecepatan dasar + variasi
+                            [
+                                (Math.random() - 0.5) * 0.05,
+                                (Math.random() - 0.5) * 0.05,
+                                (Math.random() - 0.5) * 0.05
+                            ]);
+
+                        var leaf = {
+                            matrix: leafMatrix,
+                            velocity: vel,
+                            spin: { // Putaran saat terbang
+                                y: (Math.random() - 0.5) * 0.2,
+                                z: (Math.random() - 0.5) * 0.3
+                            },
+                            lifetime: leafLifetime * (0.8 + Math.random() * 0.4)
+                        };
+                        activeLeaves.push(leaf);
+                    }
+                }
+            }
+
+            function spawnDarkPulse() {
+                var center = VEC3.transformMat4Position([0, 0.2, 0], shiftryBaseMatrix); // Posisi dada (World Space)
+                var numPulses = 12;
+                for (var i = 0; i < numPulses; i++) {
+                    var angle = (i / numPulses) * Math.PI * 2;
+                    var vel = VEC3.normalize([Math.cos(angle), (Math.random() - 0.5) * 0.2, Math.sin(angle)]);
+
+                    var pulse = {
+                        matrix: LIBS.get_I4(),
+                        position: VEC3.create(center[0], center[1], center[2]),
+                        velocity: VEC3.scale(vel, pulseSpeed),
+                        scale: 0.1,
+                        lifetime: pulseLifetime,
+                        spin: { // Properti spin acak
+                            x: (Math.random() - 0.5) * 0.1,
+                            y: (Math.random() - 0.5) * 0.1
+                        }
+                    };
+                    activePulses.push(pulse);
+                }
+            }
+
+            function spawnLeafStorm() {
+                stormTimer = stormLifetime;
+            }
+
+            function activateSwordsDance() {
+                activeSwords = [];
+                var numSwords = 4;
+
+                var startY = shiftryBaseMatrix[13] + 0.5;
+
+                for (var i = 0; i < numSwords; i++) {
+                    var sword = {
+                        matrix: LIBS.get_I4(),
+                        phaseTimer: swordsDanceDuration,
+                        angle: (i / numSwords) * Math.PI * 2,
+                        orbitSpeed: 0.08,
+                        currentRadius: 1.5,
+                        yPos: startY
+                    };
+                    activeSwords.push(sword);
+                }
+            }
+
+            let then = 0;
+
+            function render(now) {
+
+                now *= 0.001;
+
+                if (then === 0) {
+                    then = now;
+                }
+
+                const deltaTime = now - then;
+                then = now;
+
+                if (isNaN(deltaTime) || deltaTime < 0 || deltaTime > 1.0) {
+
+                    updateInput(0, treePositions, groundSize,seedotState);
+                    updateSeedotState(0, seedotState, groundSize);
+                    drawScene(gl, programInfo, shadowFramebufferInfo, buffers, cameraPosition, cameraFront, cameraUp, now, treePositions, rockPositions, housePositions, seedotState, nuzleafState, skyboxTexture, 0);
+                    requestAnimationFrame(render);
+                    return;
+                }
+
+                updateInput(deltaTime, treePositions, groundSize,seedotState);
+
+                updateSeedotState(deltaTime, seedotState, groundSize);
+
+                updateNuzleafState(deltaTime);
+
+                const armSpeed = 60.0 * deltaTime;
+                shiftryArmAngle += shiftryArmDir * armSpeed;
+                if (Math.abs(shiftryArmAngle) > 30) {
+                    shiftryArmDir *= -1;
+                }
+
+                drawScene(gl, programInfo, shadowFramebufferInfo, buffers, cameraPosition, cameraFront, cameraUp, now, treePositions, rockPositions, housePositions, seedotState, nuzleafState, skyboxTexture, deltaTime);
+
+                requestAnimationFrame(render);
+
+            }
+
+            function updateInput(deltaTime, trees, groundSize,state) {
+
+                if (spectateTarget) {
+                    let targetPosition = [0, 0, 0];
+                    let targetRotationY = 0;
+
+                    if (spectateTarget === 'seedot' && typeof seedotState !== 'undefined') {
+                        targetPosition = [...seedotState.position];
+                        targetPosition[1] -= 0.5;
+                        targetRotationY = seedotState.rotationY;
+                    } else if (spectateTarget === 'nuzleaf' && typeof nuzleafState !== 'undefined') {
+                        targetPosition = [...nuzleafState.position];
+                        targetPosition[1] += 0.2;
+                        targetRotationY = nuzleafState.rotationY;
+                    } else if (spectateTarget === 'shiftry' && typeof shiftryPosition !== 'undefined') {
+                        targetPosition = [...shiftryPosition];
+                        targetPosition[1] += 1.0;
+                        targetRotationY = shiftryRotation;
+                    } else {
+                        spectateTarget = null;
+                        return;
+                    }
+
+                    const distance = 8.0;
+                    const heightOffset = 4.0;
+
+                    const forwardX = Math.sin(targetRotationY);
+                    const forwardZ = Math.cos(targetRotationY);
+                    let forwardVector = normalizeVector([forwardX, 0, forwardZ]);
+
+                    let idealCameraPos = vec3Add(targetPosition, vec3Scale(forwardVector, distance));
+                    idealCameraPos[1] += heightOffset;
+
+                    cameraPosition = lerpVec3(cameraPosition, idealCameraPos, 0.1);
+
+                    cameraFront = normalizeVector(vec3Subtract(targetPosition, cameraPosition));
+
+                    cameraYaw = Math.atan2(cameraFront[2], cameraFront[0]) * 180 / Math.PI;
+                    cameraPitch = Math.asin(cameraFront[1]) * 180 / Math.PI;
+                    cameraPitch = Math.max(-89, Math.min(89, cameraPitch));
+
+                    if (soundInitialized) {
+                        Tone.Listener.positionX.rampTo(cameraPosition[0], 0.1);
+                        Tone.Listener.positionY.rampTo(cameraPosition[1], 0.1);
+                        Tone.Listener.positionZ.rampTo(cameraPosition[2], 0.1);
+                        Tone.Listener.forwardX.rampTo(cameraFront[0], 0.1);
+                        Tone.Listener.forwardY.rampTo(cameraFront[1], 0.1);
+                        Tone.Listener.forwardZ.rampTo(cameraFront[2], 0.1);
+                    }
+                    return;
+                }
+
+                const camSpeed = 15.0 * deltaTime;
+
+                const right = normalizeVector(crossProduct(cameraFront, [0, 1, 0]));
+
+                const forward = normalizeVector([cameraFront[0], 0, cameraFront[2]]);
+
+                let potentialPosition = [...cameraPosition];
+
+                if (keysPressed['KeyW']) potentialPosition = vec3Add(potentialPosition, vec3Scale(forward, camSpeed));
+
+                if (keysPressed['KeyS']) potentialPosition = vec3Subtract(potentialPosition, vec3Scale(forward, camSpeed));
+
+                if (keysPressed['KeyA']) potentialPosition = vec3Subtract(potentialPosition, vec3Scale(right, camSpeed));
+
+                if (keysPressed['KeyD']) potentialPosition = vec3Add(potentialPosition, vec3Scale(right, camSpeed));
+
+                if (keysPressed['Space']) {
+                    potentialPosition[1] += camSpeed;
+                }
+                if (keysPressed['ControlLeft']) {
+                    const groundY = getGroundHeight(cameraPosition[0], cameraPosition[2]);
+                    const minimumHeight = groundY + 1.0;
+                    let nextY = potentialPosition[1] - camSpeed;
+
+                    potentialPosition[1] = Math.max(minimumHeight, nextY);
+                }
+
+
+                const scaleSpeed = 0.5 * deltaTime;
+                if (keysPressed['Equal']) state.scale += scaleSpeed;
+                if (keysPressed['Minus']) state.scale -= scaleSpeed;
+                state.scale = Math.max(0.1, Math.min(3.0, state.scale));
+
+                const boundary = groundSize * 0.5 - 2.0;
+
+                potentialPosition[0] = Math.max(-boundary, Math.min(boundary, potentialPosition[0]));
+
+                potentialPosition[2] = Math.max(-boundary, Math.min(boundary, potentialPosition[2]));
+
+                let collision = false;
+
+                for (const tree of trees) { const dx = potentialPosition[0] - tree.position[0]; const dz = potentialPosition[2] - tree.position[2]; if (Math.sqrt(dx * dx + dz * dz) < tree.radius) { collision = true; break; } }
+
+                if (!collision) { cameraPosition[0] = potentialPosition[0]; cameraPosition[2] = potentialPosition[2]; }
+
+                cameraPosition[1] = potentialPosition[1];
+
+                cameraPosition[0] = potentialPosition[0];
+                cameraPosition[2] = potentialPosition[2];
+
+
+
+                if (soundInitialized) {
+
+                    Tone.Listener.positionX.rampTo(cameraPosition[0], 0.1);
+
+                    Tone.Listener.positionY.rampTo(cameraPosition[1], 0.1);
+
+                    Tone.Listener.positionZ.rampTo(cameraPosition[2], 0.1);
+
+                    Tone.Listener.forwardX.rampTo(cameraFront[0], 0.1);
+
+                    Tone.Listener.forwardY.rampTo(cameraFront[1], 0.1);
+
+                    Tone.Listener.forwardZ.rampTo(cameraFront[2], 0.1);
+
+                }
+
+                const sunSpeed = 1.0 * deltaTime;
+
+                if (keysPressed['KeyJ']) sunAzimuth -= sunSpeed; if (keysPressed['KeyL']) sunAzimuth += sunSpeed;
+
+                if (keysPressed['KeyI']) sunElevation += sunSpeed; if (keysPressed['KeyK']) sunElevation -= sunSpeed;
+
+                sunElevation = Math.max(0.1, Math.min(1.2, sunElevation));
+            }
+
+
+            function updateSeedotState(deltaTime, state, groundSize) {
+
+                if (state.isMoving) {
+
+                    const dir = [state.target[0] - state.position[0], state.target[1] - state.position[2]];
+
+                    const dist = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1]);
+
+                    if (dist < 1.0) { state.isMoving = false; state.waitTimer = state.waitTime; }
+
+                    else {
+
+                        const normDir = [dir[0] / dist, dir[1] / dist];
+
+                        state.position[0] += normDir[0] * state.speed * deltaTime;
+
+                        state.position[2] += normDir[1] * state.speed * deltaTime;
+
+                        state.rotationY = Math.atan2(normDir[0], normDir[1]);
+
+                    }
+
+                } else {
+
+                    state.waitTimer -= deltaTime;
+
+                    if (state.waitTimer <= 0) {
+
+                        state.isMoving = true;
+
+                        state.target = [(Math.random() - 0.5) * groundSize * 0.9, (Math.random() - 0.5) * groundSize * 0.9];
+
+                    }
+
+                }
+
+                const currentHeight = getGroundHeight(state.position[0], state.position[2]);
+
+                state.position[1] = currentHeight + (1.9 * state.scale);
+
+            }
+
+            function updateNuzleafState(deltaTime) {
+                if (!nuzleafState) return;
+                nuzleafState.time += deltaTime;
+
+                const currentGroundHeight = getGroundHeight(nuzleafState.position[0], nuzleafState.position[2]);
+
+                // Pivot TaperedCylinder (body) Nuzleaf ada di Y=0 lokal (tengah height=0.7).
+                // Tinggi dari pivot body ke tanah = 0.35 (setengah body) + 1.2 (kaki) + 0.075 (setengah foot) = 1.625
+                const nuzleafHeightOffset = 1.625;
+
+                // Interpolasi ketinggian agar lebih mulus
+                const targetY = currentGroundHeight + nuzleafHeightOffset;
+                nuzleafState.position[1] = lerp(nuzleafState.position[1], targetY, 0.1); // Faktor interpolasi 0.1
+            }
+
+
+            function drawScene(gl, programInfo, shadowFramebufferInfo, buffers, cameraPosition, cameraFront, cameraUp, time, treePositions, rockPositions, housePositions, seedotState, nuzleafState, skyboxTexture, deltaTime) {
+
+                const lightDirection = normalizeVector([Math.sin(sunAzimuth) * Math.cos(sunElevation), Math.sin(sunElevation), Math.cos(sunAzimuth) * Math.cos(sunElevation)]);
+
+                const sunElevationNorm = lightDirection[1];
+
+                const sunsetFactor = 1.0 - smoothstep(0.0, 0.2, sunElevationNorm);
+
+                const daySunColor = [1.0, 0.95, 0.85];
+
+                const sunsetSunColor = [1.0, 0.7, 0.3];
+
+                const sunColor = lerpVec3(daySunColor, sunsetSunColor, sunsetFactor);
+
+                const dayAmbient = [0.4, 0.5, 0.7];
+
+                const sunsetAmbient = [0.5, 0.3, 0.2];
+
+                const ambientColor = lerpVec3(dayAmbient, sunsetAmbient, sunsetFactor);
+
+                const dayFog = [0.67, 0.72, 0.75];
+
+                const sunsetFog = [0.8, 0.5, 0.4];
+
+                const fogColor = lerpVec3(dayFog, sunsetFog, sunsetFactor);
+
+                const horizonColor = [1.0, 0.6, 0.2]; // Untuk skybox tint
+
+
+                const lightProjectionMatrix = createOrthographicMatrix(-80, 80, -80, 80, 1, 200);
+
+                const lightViewMatrix = createLookAtMatrix([-lightDirection[0] * 80, -lightDirection[1] * 80, -lightDirection[2] * 80], [0, 0, 0], [0, 1, 0]);
+
+
+                gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFramebufferInfo.framebuffer);
+
+                gl.viewport(0, 0, shadowFramebufferInfo.width, shadowFramebufferInfo.height);
+
+                gl.clear(gl.DEPTH_BUFFER_BIT); gl.useProgram(programInfo.shadow.program);
+
+                gl.uniformMatrix4fv(programInfo.shadow.uniformLocations.lightViewMatrix, false, lightViewMatrix);
+
+                gl.uniformMatrix4fv(programInfo.shadow.uniformLocations.lightProjectionMatrix, false, lightProjectionMatrix);
+
+
+                function drawForShadow(buffer, modelMatrix) {
+
+                    gl.uniformMatrix4fv(programInfo.shadow.uniformLocations.modelMatrix, false, modelMatrix);
+
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer.position); gl.vertexAttribPointer(programInfo.shadow.attribLocations.vertexPosition, 3, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(programInfo.shadow.attribLocations.vertexPosition);
+
+                    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer.indices); gl.drawElements(gl.TRIANGLES, buffer.count, gl.UNSIGNED_SHORT, 0);
+
+                }
+
+
+                treePositions.forEach(t => { const m = createIdentityMatrix(); translate(m, t.position); rotateY(m, t.rotation); scale(m, [t.scale, t.scale, t.scale]); if (t.type === 'pine') { drawForShadow(buffers.pineTrunk, m); drawForShadow(buffers.pineCanopy, m); } else { drawForShadow(buffers.treeTrunk, m); drawForShadow(buffers.treeCanopy, m); } });
+
+                rockPositions.forEach(r => { const m = createIdentityMatrix(); translate(m, r.position); rotateX(m, r.rotation[0]); rotateY(m, r.rotation[1]); rotateZ(m, r.rotation[2]); scale(m, r.scale); drawForShadow(buffers.rock, m); });
+
+                housePositions.forEach(h => {
+
+                    const m = createIdentityMatrix(); translate(m, h.position); rotateY(m, h.rotation); scale(m, h.scale);
+
+                    drawForShadow(buffers.houseBody, m);
+
+                    drawForShadow(buffers.houseRoof, m);
+
+
+                    const doorM_s = Array.from(m);
+
+                    translate(doorM_s, [0, -1.5, 3.05]);
+
+                    drawForShadow(buffers.houseDoor, doorM_s)
+
+
+                    const windowM_s = Array.from(m);
+
+                    translate(windowM_s, [2.0, 0.5, 3.05]);
+
+                    drawForShadow(buffers.houseWindow, windowM_s);
+
+
+                    const chimneyM_s = Array.from(m);
+
+                    translate(chimneyM_s, [2.0, 3.2, -1.5]);
+
+                    drawForShadow(buffers.houseChimney, chimneyM_s);
+
+                });
+
+                const bSM = createIdentityMatrix(); translate(bSM, seedotState.position); rotateY(bSM, seedotState.rotationY),scale(bSM, [seedotState.scale, seedotState.scale, seedotState.scale]);;
+
+                drawForShadow(buffers.hat, bSM); drawForShadow(buffers.body, bSM);
+
+                const eyeY = -0.3, eyeZ = 1.15, eyeSeparation = 0.45;
+
+                const lOuterEyeM_s = Array.from(bSM); translate(lOuterEyeM_s, [-eyeSeparation, eyeY, eyeZ]); drawForShadow(buffers.eyeOuter, lOuterEyeM_s);
+
+                const rOuterEyeM_s = Array.from(bSM); translate(rOuterEyeM_s, [eyeSeparation, eyeY, eyeZ]); drawForShadow(buffers.eyeOuter, rOuterEyeM_s);
+
+                const lFSM = Array.from(bSM); translate(lFSM, [-.6, -1.4, .4]); rotateY(lFSM, -.3 + (seedotState.isMoving ? Math.sin(time * 15) * .5 : 0)); drawForShadow(buffers.foot, lFSM);
+
+                const rFSM = Array.from(bSM); translate(rFSM, [.6, -1.4, .4]); rotateY(rFSM, .3 + (seedotState.isMoving ? Math.cos(time * 15) * .5 : 0)); drawForShadow(buffers.foot, rFSM);
+
+                // 1. Buat matriks Parent bayangan (Posisi + Rotasi)
+                let shiftryShadowBase = createIdentityMatrix();
+                translate(shiftryShadowBase, shiftryPosition);
+                rotateY(shiftryShadowBase, shiftryRotation);
+
+                // 2. Gambar Bayangan Badan (Induk + Skala)
+                let shiftryShadowBodyMatrix = Array.from(shiftryShadowBase);
+                scale(shiftryShadowBodyMatrix, shiftryScaleVec);
+                drawForShadow(buffers.shiftryBody, shiftryShadowBodyMatrix);
+
+                // 3. Buat Matriks Bahu Kiri (Parent Lengan)
+                let leftShoulderShadowMatrix = Array.from(shiftryShadowBase);
+                translate(leftShoulderShadowMatrix, [1.2, 0.1, 0]);
+                rotateZ(leftShoulderShadowMatrix, LIBS.degToRad(-shiftryArmAngle));
+
+                // 4. Gambar Bayangan Bahu Kiri (Sphere)
+                let leftShoulderShadowDrawMatrix = Array.from(leftShoulderShadowMatrix);
+                scale(leftShoulderShadowDrawMatrix, shiftryScaleVec);
+                drawForShadow(buffers.shiftryShoulder, leftShoulderShadowDrawMatrix);
+
+                // 5. Gambar Bayangan Lengan Kiri (Child Bahu)
+                let leftArmShadowMatrix = Array.from(leftShoulderShadowMatrix);
+                scale(leftArmShadowMatrix, shiftryScaleVec);
+                drawForShadow(buffers.shiftryArmLeft, leftArmShadowMatrix);
+
+                // 6. Buat Matriks Bahu Kanan
+                let rightShoulderShadowMatrix = Array.from(shiftryShadowBase);
+                translate(rightShoulderShadowMatrix, [-1.2, 0.1, 0]);
+                rotateZ(rightShoulderShadowMatrix, LIBS.degToRad(shiftryArmAngle));
+
+                // 7. Gambar Bayangan Bahu Kanan (Sphere)
+                let rightShoulderShadowDrawMatrix = Array.from(rightShoulderShadowMatrix);
+                scale(rightShoulderShadowDrawMatrix, shiftryScaleVec);
+                drawForShadow(buffers.shiftryShoulder, rightShoulderShadowDrawMatrix);
+
+                // 8. Gambar Bayangan Lengan Kanan (Child Bahu)
+                let rightArmShadowMatrix = Array.from(rightShoulderShadowMatrix);
+                scale(rightArmShadowMatrix, shiftryScaleVec);
+                drawForShadow(buffers.shiftryArmRight, rightArmShadowMatrix);
+
+                drawNuzleaf(gl, programInfo, buffers, nuzleafState, time,
+                    (buffer, color, shininess, modelMatrix) => {
+
+                        drawForShadow(buffer, modelMatrix);
+                    },
+                    true
+                );
+
+                activeSwords.forEach(s => drawForShadow(buffers.sword, s.matrix));
+                activeLeaves.forEach(l => drawForShadow(buffers.razorLeaf, l.matrix));
+                activePulses.forEach(p => drawForShadow(buffers.darkPulse, p.matrix));
+                activeStorm.forEach(l => drawForShadow(buffers.leafStorm, l.matrix));
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+                resizeCanvasToDisplaySize(gl.canvas); gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+
+                gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+                gl.enable(gl.DEPTH_TEST);
+
+
+
+                const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
+
+                const projectionMatrix = createPerspectiveMatrix(60 * Math.PI / 180, aspect, 0.1, 250.0);
+
+                const viewMatrix = createLookAtMatrix(cameraPosition, vec3Add(cameraPosition, cameraFront), cameraUp);
+
+
+
+                // Gambar semua objek solid
+
+                gl.useProgram(programInfo.main.program);
+
+                gl.uniformMatrix4fv(programInfo.main.uniformLocations.projectionMatrix, false, projectionMatrix);
+
+                gl.uniformMatrix4fv(programInfo.main.uniformLocations.viewMatrix, false, viewMatrix);
+
+                gl.uniformMatrix4fv(programInfo.main.uniformLocations.lightViewMatrix, false, lightViewMatrix);
+
+                gl.uniformMatrix4fv(programInfo.main.uniformLocations.lightProjectionMatrix, false, lightProjectionMatrix);
+
+                gl.uniform3fv(programInfo.main.uniformLocations.lightDirection, lightDirection);
+
+                // Gunakan warna dinamis
+
+                gl.uniform3fv(programInfo.main.uniformLocations.lightColor, sunColor);
+
+                gl.uniform3fv(programInfo.main.uniformLocations.ambientLightColor, ambientColor);
+
+                gl.uniform3fv(programInfo.main.uniformLocations.viewPosition, cameraPosition);
+
+                gl.uniform3fv(programInfo.main.uniformLocations.fogColor, fogColor);
+
+                gl.uniform1f(programInfo.main.uniformLocations.fogDensity, 0.015);
+
+                // Uniform untuk PCF
+
+                gl.uniform2f(programInfo.main.uniformLocations.shadowMapSize, shadowFramebufferInfo.width, shadowFramebufferInfo.height);
+
+                gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, shadowFramebufferInfo.shadowTexture);
+
+                gl.uniform1i(programInfo.main.uniformLocations.shadowMap, 0);
+
+
+
+                function drawObject(buffer, color, shininess, modelMatrix) {
+                    gl.uniform1i(programInfo.main.uniformLocations.useVertexColor, 0);
+                    gl.uniformMatrix4fv(programInfo.main.uniformLocations.modelMatrix, false, modelMatrix); gl.uniform3fv(programInfo.main.uniformLocations.objectColor, color); gl.uniform1f(programInfo.main.uniformLocations.shininess, shininess);
+
+                    const mainVAP = programInfo.main.attribLocations.vertexPosition, mainVAN = programInfo.main.attribLocations.vertexNormal;
+
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer.position); gl.vertexAttribPointer(mainVAP, 3, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(mainVAP);
+
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer.normal); gl.vertexAttribPointer(mainVAN, 3, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(mainVAN);
+
+                    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer.indices); gl.drawElements(gl.TRIANGLES, buffer.count, gl.UNSIGNED_SHORT, 0);
+
+                }
+
+                function drawObjectWithColor(buffer, shininess, modelMatrix) {
+                    gl.uniform1i(programInfo.main.uniformLocations.useVertexColor, 1);
+                    gl.uniformMatrix4fv(programInfo.main.uniformLocations.modelMatrix, false, modelMatrix);
+                    gl.uniform1f(programInfo.main.uniformLocations.shininess, shininess);
+
+                    const mainVAP = programInfo.main.attribLocations.vertexPosition;
+                    const mainVAN = programInfo.main.attribLocations.vertexNormal;
+                    const mainVAC = programInfo.main.attribLocations.color;
+
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer.position);
+                    gl.vertexAttribPointer(mainVAP, 3, gl.FLOAT, false, 0, 0);
+                    gl.enableVertexAttribArray(mainVAP);
+
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer.normal);
+                    gl.vertexAttribPointer(mainVAN, 3, gl.FLOAT, false, 0, 0);
+                    gl.enableVertexAttribArray(mainVAN);
+
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer.color);
+                    gl.vertexAttribPointer(mainVAC, 3, gl.FLOAT, false, 0, 0);
+                    gl.enableVertexAttribArray(mainVAC);
+
+                    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer.indices);
+                    gl.drawElements(gl.TRIANGLES, buffer.count, gl.UNSIGNED_SHORT, 0);
+
+                    gl.disableVertexAttribArray(mainVAC);
+                }
+
+
+
+                gl.uniform1i(programInfo.main.uniformLocations.isGround, 1);
+
+                drawObject(buffers.ground, [0.0, 0.0, 0.0], 8.0, createIdentityMatrix());
+
+                gl.uniform1i(programInfo.main.uniformLocations.isGround, 0);
+
+
+
+                gl.uniform1i(programInfo.main.uniformLocations.isGrass, 1);
+
+                drawObject(buffers.grass, [0.0, 0.0, 0.0], 4.0, createIdentityMatrix());
+
+                gl.uniform1i(programInfo.main.uniformLocations.isGrass, 0);
+
+
+
+                treePositions.forEach(t => { const m = createIdentityMatrix(); translate(m, t.position); rotateY(m, t.rotation); scale(m, [t.scale, t.scale, t.scale]); if (t.type === 'pine') { drawObject(buffers.pineTrunk, [.3, .2, .1], 4, m); drawObject(buffers.pineCanopy, [.1, .4, .1], 16, m); } else { drawObject(buffers.treeTrunk, [.4, .25, .15], 4, m); drawObject(buffers.treeCanopy, [.1, .5, .15], 16, m); } });
+
+                rockPositions.forEach(r => { const m = createIdentityMatrix(); translate(m, r.position); rotateX(m, r.rotation[0]); rotateY(m, r.rotation[1]); rotateZ(m, r.rotation[2]); scale(m, r.scale); drawObject(buffers.rock, [0.4, 0.42, 0.45], 12, m); });
+
+                housePositions.forEach(h => {
+
+                    const m = createIdentityMatrix(); translate(m, h.position); rotateY(m, h.rotation); scale(m, h.scale);
+
+
+
+                    drawObject(buffers.houseBody, [0.7, 0.6, 0.4], 16, m);
+
+                    drawObject(buffers.houseRoof, [0.6, 0.2, 0.1], 16, m);
+
+
+
+                    const doorM = Array.from(m);
+
+                    translate(doorM, [0, -1.5, 3.05]);
+
+                    drawObject(buffers.houseDoor, [0.4, 0.2, 0.05], 8, doorM);
+
+
+
+                    const windowM = Array.from(m);
+
+                    translate(windowM, [2.0, 0.5, 3.05]);
+
+                    drawObject(buffers.houseWindow, [0.6, 0.8, 1.0], 32, windowM);
+
+
+
+                    const chimneyM = Array.from(m);
+
+                    translate(chimneyM, [2.0, 3.2, -1.5]);
+
+                    drawObject(buffers.houseChimney, [0.5, 0.5, 0.5], 12, chimneyM);
+
+                });
+
+                const sMM = createIdentityMatrix(); translate(sMM, seedotState.position); rotateY(sMM, seedotState.rotationY),scale(sMM, [seedotState.scale, seedotState.scale, seedotState.scale]);;
+
+                if (seedotState.isMoving) { rotateX(sMM, Math.sin(time * 15) * .05) }
+
+                drawObject(buffers.hat, [0.55, 0.58, 0.6], 32, sMM);
+
+                gl.uniform1i(programInfo.main.uniformLocations.isBody, 1);
+
+                drawObject(buffers.body, [0.65, 0.48, 0.33], 24, sMM);
+
+
+                gl.uniform1i(programInfo.main.uniformLocations.isBody, 0);
+
+
+                let leftRot = -0.3;
+
+                let rightRot = 0.3;
+
+                let leftY = -1.4;
+
+                let rightY = -1.4;
+
+
+                // Hanya lakukan animasi jika 'isMoving' true
+
+                if (seedotState.isMoving) {
+
+                    const stepSpeed = time * 15;
+
+                    const stepHeight = 0.3; // Seberapa tinggi kaki diangkat
+
+                    const stepAngle = 0.5;  // Seberapa jauh kaki berotasi
+
+
+
+                    // sin dan -sin (sin + PI) untuk gerakan bolak-balik yang sempurna
+
+                    const leftCycle = Math.sin(stepSpeed);
+
+                    const rightCycle = -leftCycle; // Kebalikan dari leftCycle
+
+
+                    // 1. Tambahkan animasi ke rotasi dasar
+
+                    leftRot += leftCycle * stepAngle;
+
+                    rightRot += rightCycle * stepAngle;
+
+                    // 2. Tambahkan animasi ke ketinggian (Y)
+
+                    // Math.max(0.0, cycle) agar kaki hanya terangkat saat bergerak ke depan
+
+                    leftY += Math.max(0.0, leftCycle) * stepHeight;
+
+                    rightY += Math.max(0.0, rightCycle) * stepHeight;
+
+                }
+
+                const lFM = Array.from(sMM);
+
+                translate(lFM, [-.6, leftY, .4]);
+
+                rotateY(lFM, leftRot);
+
+                drawObject(buffers.foot, [.86, .76, .58], 16, lFM);
+
+
+
+                const rFM = Array.from(sMM);
+
+                translate(rFM, [.6, rightY, .4]);
+
+                rotateY(rFM, rightRot);
+
+                drawObject(buffers.foot, [.86, .76, .58], 16, rFM);
+
+                // Gambar shiftry
+
+                const armRotationAbitraryAxisLeft = normalizeVector([1, 0, 1]);
+                const armRotationAbitraryAxisRight = normalizeVector([1, 0, 1]);
+
+                // 1. Buat matriks Parent
+                let shiftryBaseTransform = createIdentityMatrix();
+                translate(shiftryBaseTransform, shiftryPosition);
+                rotateY(shiftryBaseTransform, shiftryRotation);
+
+                // 2. Gambar badan (Induk + Skala)
+                shiftryBaseMatrix = Array.from(shiftryBaseTransform); // Salin matriks induk
+                scale(shiftryBaseMatrix, shiftryScaleVec); // Terapkan skala
+                drawObjectWithColor(buffers.shiftryBody, 16.0, shiftryBaseMatrix);
+
+                // 3. Gambar Lengan Kiri 
+                // Buat matriks Bahu Kiri
+                let leftShoulderMatrix = Array.from(shiftryBaseTransform); // Mulai dari induk (badan)
+                translate(leftShoulderMatrix, [1.2, 0.1, 0]); // Pindah ke bahu kiri (lokal)
+                rotateAroundAxis(leftShoulderMatrix, LIBS.degToRad(-shiftryArmAngle), armRotationAbitraryAxisLeft); // Rotasi bahu
+
+                // Gambar Bahu Kiri (Sphere)
+                let leftShoulderDrawMatrix = Array.from(leftShoulderMatrix); // Salin matriks bahu
+                scale(leftShoulderDrawMatrix, shiftryScaleVec); // Skala
+                drawObjectWithColor(buffers.shiftryShoulder, 16.0, leftShoulderDrawMatrix);
+
+                // Gambar Lengan Kiri 
+                let armLeftMatrix = Array.from(leftShoulderMatrix); // Mulai dari matriks BAHU
+                scale(armLeftMatrix, shiftryScaleVec); // Skala
+                drawObjectWithColor(buffers.shiftryArmLeft, 16.0, armLeftMatrix);
+
+                // 4. Gambar Lengan Kanan
+                // Buat matriks Bahu Kanan (Parent Lengan)
+                let rightShoulderMatrix = Array.from(shiftryBaseTransform); // Mulai dari induk (badan)
+                translate(rightShoulderMatrix, [-1.2, 0.1, 0]); // Pindah ke bahu kanan (lokal)
+                rotateAroundAxis(rightShoulderMatrix, LIBS.degToRad(shiftryArmAngle), armRotationAbitraryAxisRight); // Rotasi bahu
+
+                // Gambar Bahu Kanan (Sphere)
+                let rightShoulderDrawMatrix = Array.from(rightShoulderMatrix); // Salin matriks bahu
+                scale(rightShoulderDrawMatrix, shiftryScaleVec); // Skala
+                drawObjectWithColor(buffers.shiftryShoulder, 16.0, rightShoulderDrawMatrix);
+
+                // Gambar Lengan Kanan (Child dari Bahu)
+                let armRightMatrix = Array.from(rightShoulderMatrix); // Mulai dari matriks bahu
+                scale(armRightMatrix, shiftryScaleVec); // Skala
+                drawObjectWithColor(buffers.shiftryArmRight, 16.0, armRightMatrix);
+
+                gl.uniform1i(programInfo.main.uniformLocations.isBody, 0);
+
+                drawNuzleaf(gl, programInfo, buffers, nuzleafState, time, drawObject, false);
+
+                if (wantsToSpawnRazorLeaf) {
+                    spawnRazorLeaf();
+                    wantsToSpawnRazorLeaf = false;
+                }
+                if (wantsToSpawnDarkPulse) {
+                    spawnDarkPulse();
+                    wantsToSpawnDarkPulse = false;
+                }
+                if (wantsToSpawnLeafStorm) {
+                    spawnLeafStorm();
+                    wantsToSpawnLeafStorm = false;
+                }
+                if (wantsToSpawnSwordsDance) {
+                    activateSwordsDance();
+                    wantsToSpawnSwordsDance = false;
+                }
+
+
+                // Update Swords Dance
+                for (let i = activeSwords.length - 1; i >= 0; i--) {
+                    const sword = activeSwords[i];
+                    sword.phaseTimer -= deltaTime;
+
+                    if (sword.phaseTimer <= 0) {
+                        activeSwords.splice(i, 1);
+                        continue;
+                    }
+
+                    sword.angle += sword.orbitSpeed;
+
+                    const progress = 1.0 - (sword.phaseTimer / swordsDanceDuration);
+
+                    const scale = 0.5 + progress * 1.2;
+
+                    sword.alpha = Math.max(0, 0.5 - progress * 1.2);
+
+                    const x = shiftryBaseMatrix[12] + Math.cos(sword.angle) * sword.currentRadius;
+                    const y = shiftryBaseMatrix[13] + 1.0;
+                    const z = shiftryBaseMatrix[14] + Math.sin(sword.angle) * sword.currentRadius;
+
+                    LIBS.set_I4(sword.matrix);
+                    LIBS.set_position(sword.matrix, x, y, z);
+                    LIBS.rotateY(sword.matrix, -sword.angle + Math.PI / 2);
+                    LIBS.scale(sword.matrix, [scale, scale, scale]);
+                }
+
+
+                // Update Razor Leaf
+                for (let i = activeLeaves.length - 1; i >= 0; i--) {
+                    const leaf = activeLeaves[i];
+                    leaf.lifetime -= deltaTime;
+                    if (leaf.lifetime <= 0) {
+                        activeLeaves.splice(i, 1);
+                    } else {
+                        LIBS.translateX(leaf.matrix, leaf.velocity[0] * (60 * deltaTime));
+                        LIBS.translateY(leaf.matrix, leaf.velocity[1] * (60 * deltaTime));
+                        LIBS.translateZ(leaf.matrix, leaf.velocity[2] * (60 * deltaTime));
+                        LIBS.rotateY(leaf.matrix, leaf.spin.y);
+                        LIBS.rotateZ(leaf.matrix, leaf.spin.z);
+                    }
+                }
+
+                // Update Dark Pulse
+                for (let i = activePulses.length - 1; i >= 0; i--) {
+                    const pulse = activePulses[i];
+                    pulse.lifetime -= deltaTime;
+                    if (pulse.lifetime <= 0) {
+                        activePulses.splice(i, 1);
+                    } else {
+                        pulse.position = VEC3.add(pulse.position, VEC3.scale(pulse.velocity, 60 * deltaTime));
+                        const t = (pulseLifetime - pulse.lifetime) / pulseLifetime;
+                        pulse.scale = 0.1 + (t * t) * 4.0;
+
+                        LIBS.set_I4(pulse.matrix);
+                        LIBS.set_position(pulse.matrix, pulse.position[0], pulse.position[1], pulse.position[2]);
+                        LIBS.rotateX(pulse.matrix, LIBS.degToRad(90));
+                        LIBS.scale(pulse.matrix, [pulse.scale, pulse.scale, pulse.scale]);
+                    }
+                }
+
+                // Update Leaf Storm
+                if (stormTimer > 0) {
+                    stormTimer -= deltaTime;
+                    for (let i = 0; i < stormSpawnRate; i++) {
+                        const center = VEC3.transformMat4Position([0, 1.0, 0], shiftryBaseMatrix);
+                        const stormLeaf = {
+                            matrix: LIBS.get_I4(),
+                            position: VEC3.create(center[0], center[1], center[2]),
+                            lifetime: stormLifetime,
+                            totalLifetime: stormLifetime,
+                            orbitRadius: 1.0 + Math.random() * 1.5,
+                            orbitSpeed: 0.03 + Math.random() * 0.05,
+                            angle: Math.random() * Math.PI * 2,
+                            spin: (Math.random() - 0.5) * 0.5,
+                            hasAttacked: false // supaya tidak terus menyerang
+                        };
+                        activeStorm.push(stormLeaf);
+                    }
+                }
+
+                // Update setiap daun
+                for (let i = activeStorm.length - 1; i >= 0; i--) {
+                    const leaf = activeStorm[i];
+                    leaf.lifetime -= deltaTime;
+
+                    if (leaf.lifetime <= 0) {
+                        activeStorm.splice(i, 1);
+                        continue;
+                    }
+
+                    const progress = 1.0 - (leaf.lifetime / leaf.totalLifetime);
+
+                    if (progress < 0.6) {
+                        leaf.angle += leaf.orbitSpeed;
+                        leaf.position[0] = shiftryBaseMatrix[12] + Math.cos(leaf.angle) * leaf.orbitRadius;
+                        leaf.position[2] = shiftryBaseMatrix[14] + Math.sin(leaf.angle) * leaf.orbitRadius;
+                        leaf.position[1] = shiftryBaseMatrix[13] + 2.0 + Math.sin(progress * Math.PI * 2) * 0.2;
+                    }
+
+                    else if (progress < 0.8) {
+                        leaf.angle += leaf.orbitSpeed * 2.5;
+                        leaf.position[0] = shiftryBaseMatrix[12] + Math.cos(leaf.angle) * (leaf.orbitRadius * 0.8);
+                        leaf.position[2] = shiftryBaseMatrix[14] + Math.sin(leaf.angle) * (leaf.orbitRadius * 0.8);
+                        leaf.position[1] += 0.1 * (60 * deltaTime);
+                    }
+
+                    else {
+                        if (!leaf.hasAttacked) {
+                            leaf.hasAttacked = true;
+
+                            const forwardDir = [0, 0, 1];
+                            leaf.forward = VEC3.transformMat4Normal(forwardDir, shiftryBaseMatrix);
+                            VEC3.normalize(leaf.forward);
+                        }
+
+                        const speed = 1.5 * (60 * deltaTime);
+                        leaf.position[0] += leaf.forward[0] * speed;
+                        leaf.position[1] += leaf.forward[1] * speed;
+                        leaf.position[2] += leaf.forward[2] * speed;
+                    }
+
+                    LIBS.set_I4(leaf.matrix);
+                    LIBS.set_position(leaf.matrix, leaf.position[0], leaf.position[1], leaf.position[2]);
+                    LIBS.rotateY(leaf.matrix, leaf.angle);
+                    LIBS.rotateZ(leaf.matrix, leaf.spin * leaf.lifetime);
+                }
+
+                // gambar skills
+                gl.uniform1i(programInfo.main.uniformLocations.isBody, 0);
+
+                activeSwords.forEach(s => {
+                    drawObjectWithColor(buffers.sword, 32.0, s.matrix);
+                });
+                activeLeaves.forEach(l => {
+                    drawObjectWithColor(buffers.razorLeaf, 8.0, l.matrix);
+                });
+                activePulses.forEach(p => {
+                    drawObjectWithColor(buffers.darkPulse, 16.0, p.matrix);
+                });
+                activeStorm.forEach(l => {
+                    drawObjectWithColor(buffers.leafStorm, 8.0, l.matrix);
+                });
+
+
+                // Gambar Kunang-kunang
+
+                gl.enable(gl.BLEND);
+
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+                gl.depthMask(false);
+
+                gl.useProgram(programInfo.firefly.program);
+
+                gl.uniformMatrix4fv(programInfo.firefly.uniformLocations.projectionMatrix, false, projectionMatrix);
+
+                gl.uniformMatrix4fv(programInfo.firefly.uniformLocations.viewMatrix, false, viewMatrix);
+
+                gl.uniform1f(programInfo.firefly.uniformLocations.time, time);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffers.fireflies.position);
+
+                gl.vertexAttribPointer(programInfo.firefly.attribLocations.vertexPosition, 3, gl.FLOAT, false, 0, 0);
+
+                gl.enableVertexAttribArray(programInfo.firefly.attribLocations.vertexPosition);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffers.fireflies.offset);
+
+                gl.vertexAttribPointer(programInfo.firefly.attribLocations.offset, 1, gl.FLOAT, false, 0, 0);
+
+                gl.enableVertexAttribArray(programInfo.firefly.attribLocations.offset);
+
+                gl.drawArrays(gl.POINTS, 0, buffers.fireflies.count);
+
+                gl.depthMask(true);
+
+                gl.disable(gl.BLEND);
+
+
+                // Gambar Air 
+
+                gl.enable(gl.BLEND);
+
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+                gl.depthMask(false);
+
+                gl.useProgram(programInfo.water.program);
+
+                gl.uniformMatrix4fv(programInfo.water.uniformLocations.projectionMatrix, false, projectionMatrix);
+
+                gl.uniformMatrix4fv(programInfo.water.uniformLocations.viewMatrix, false, viewMatrix);
+
+                gl.uniformMatrix4fv(programInfo.water.uniformLocations.modelMatrix, false, createIdentityMatrix());
+
+                gl.uniform1f(programInfo.water.uniformLocations.time, time);
+
+                gl.uniform3fv(programInfo.water.uniformLocations.viewPosition, cameraPosition);
+
+                gl.uniform3fv(programInfo.water.uniformLocations.lightDirection, lightDirection);
+
+                // Gunakan warna dinamis
+
+                gl.uniform3fv(programInfo.water.uniformLocations.lightColor, sunColor);
+
+                gl.uniform3fv(programInfo.water.uniformLocations.fogColor, fogColor);
+
+                gl.uniform3fv(programInfo.water.uniformLocations.ambientLight, ambientColor);
+
+                gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, skyboxTexture);
+
+                gl.uniform1i(programInfo.water.uniformLocations.skyboxTexture, 1);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffers.water.position);
+
+                gl.vertexAttribPointer(programInfo.water.attribLocations.vertexPosition, 3, gl.FLOAT, false, 0, 0);
+
+                gl.enableVertexAttribArray(programInfo.water.attribLocations.vertexPosition);
+
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.water.indices);
+
+                gl.drawElements(gl.TRIANGLES, buffers.water.count, gl.UNSIGNED_SHORT, 0);
+
+                gl.depthMask(true);
+
+                gl.disable(gl.BLEND);
+
+
+                // Gambar Clouds
+
+                gl.enable(gl.BLEND);
+
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+                gl.depthMask(false);
+
+                gl.useProgram(programInfo.cloud.program);
+
+                gl.uniformMatrix4fv(programInfo.cloud.uniformLocations.projectionMatrix, false, projectionMatrix);
+
+                gl.uniformMatrix4fv(programInfo.cloud.uniformLocations.viewMatrix, false, viewMatrix);
+
+                gl.uniform1f(programInfo.cloud.uniformLocations.time, time);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffers.clouds.position);
+
+                gl.vertexAttribPointer(programInfo.cloud.attribLocations.vertexPosition, 3, gl.FLOAT, false, 0, 0);
+
+                gl.enableVertexAttribArray(programInfo.cloud.attribLocations.vertexPosition);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffers.clouds.offset);
+
+                gl.vertexAttribPointer(programInfo.cloud.attribLocations.offset, 1, gl.FLOAT, false, 0, 0);
+
+                gl.enableVertexAttribArray(programInfo.cloud.attribLocations.offset);
+
+                gl.drawArrays(gl.POINTS, 0, buffers.clouds.count);
+
+                gl.depthMask(true);
+
+                gl.disable(gl.BLEND);
+
+
+                // Gambar Skybox 
+
+                gl.depthFunc(gl.LEQUAL);
+
+                gl.useProgram(programInfo.skybox.program);
+
+                gl.uniformMatrix4fv(programInfo.skybox.uniformLocations.projectionMatrix, false, projectionMatrix);
+
+                gl.uniformMatrix4fv(programInfo.skybox.uniformLocations.viewMatrix, false, viewMatrix);
+
+                gl.uniform3fv(programInfo.skybox.uniformLocations.sunDirection, lightDirection);
+
+                // Gunakan warna dinamis
+
+                gl.uniform3fv(programInfo.skybox.uniformLocations.sunColor, sunColor);
+
+                gl.uniform3fv(programInfo.skybox.uniformLocations.horizonColor, horizonColor);
+
+                gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, skyboxTexture);
+
+                gl.uniform1i(programInfo.skybox.uniformLocations.skyboxTexture, 1);
+
+                const skyVAP = programInfo.skybox.attribLocations.vertexPosition;
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffers.skybox.position); gl.vertexAttribPointer(skyVAP, 3, gl.FLOAT, false, 0, 0); gl.enableVertexAttribArray(skyVAP);
+
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.skybox.indices); gl.drawElements(gl.TRIANGLES, buffers.skybox.count, gl.UNSIGNED_SHORT, 0);
+
+                gl.depthFunc(gl.LESS);
+
+            }
+
+            requestAnimationFrame(render);
+
+        }
+
+        function drawNuzleaf(gl, programInfo, buffers, state, time, drawCallback, isShadowPass = false) {
+            if (!state) return;
+            const degToRad = Math.PI / 180.0;
+
+            // State Animasi Idle
+            const nz_time = state.time;
+            const nz_breathScale = 1.0 + Math.sin(nz_time * 2.5) * 0.03;
+            const nz_walkOffset = Math.sin(nz_time * 5.0) * 0.08;
+            const nz_headTilt = Math.sin(nz_time * 1.5) * 0.05;
+            const nz_leafSway = Math.sin(nz_time * 3.0) * 0.2;
+
+            const C = NUZLEAF_COLORS; // Warna
+
+            // Matriks Dasar Nuzleaf
+            const nuzleafBaseMatrix = createIdentityMatrix();
+            translate(nuzleafBaseMatrix, state.position);
+            rotateY(nuzleafBaseMatrix, state.rotationY);
+
+            // Body (Pivot Tapered Cylinder di tengah Y=0, height=0.8)
+            const bodyHeight = 0.8;
+            const nuzleafBodyMatrix = Array.from(nuzleafBaseMatrix);
+            scale(nuzleafBodyMatrix, [1.0, nz_breathScale, 1.0]); // Nafas
+            if (!isShadowPass) gl.uniform1i(programInfo.main.uniformLocations.isBody, 0);
+            drawCallback(buffers.nuzleafBody, C.BODY, 16, nuzleafBodyMatrix);
+
+            // Head (Anak dari Body, Pivot Ellipsoid di tengah, tinggi ry=0.9*0.7)
+            const headRadiusY = 0.9 * 0.7;
+            const headOffsetY = bodyHeight / 2 + 0.05; // Offset dari pivot body (tengah) ke pivot head
+            const nuzleafHeadMatrix = Array.from(nuzleafBodyMatrix);
+            translate(nuzleafHeadMatrix, [0, headOffsetY, 0]);
+            rotateZ(nuzleafHeadMatrix, nz_headTilt); // Tilt
+            drawCallback(buffers.nuzleafHead, C.BODY, 16, nuzleafHeadMatrix);
+
+            //  Detail Kepala (Anak dari Head) 
+            const headRadiusZ = 0.8 * 0.7; // Radius Z kepala
+
+            // Hidung: Pivot Cone di dasar (Y=0). Tinggi 0.3
+            const noseHeight = 0.3;
+            const noseMatrix = Array.from(nuzleafHeadMatrix);
+            // Translate relatif ke pivot head (tengah)
+            translate(noseMatrix, [0, 0.02, headRadiusZ * 1]); // Y sedikit naik, Z maju
+            rotateX(noseMatrix, 90 * degToRad); // Arahkan ke depan
+            drawCallback(buffers.nuzleafNose, C.SKIN, 32, noseMatrix);
+
+            // Mulut: Pivot Ellipsoid di tengah
+            const mouthMatrix = Array.from(nuzleafHeadMatrix);
+            translate(mouthMatrix, [0, -0.12, headRadiusZ * 1]); // Turunkan, majukan
+            drawCallback(buffers.nuzleafMouth, C.MOUTH, 8, mouthMatrix);
+
+            // Daun Stem: Pivot Cylinder di tengah Y=0, tinggi 0.4
+            const leafStemHeight = 0.4;
+            const leafStemMatrix = Array.from(nuzleafHeadMatrix);
+            // Translate relatif ke pivot head (tengah), posisikan di puncak kepala (Y head = headRadiusY)
+            translate(leafStemMatrix, [0, headRadiusY, 0]);
+            drawCallback(buffers.nuzleafLeafStem, C.LEAF, 16, leafStemMatrix);
+
+            // Daun Blade: Pivot Bezier di dasar (Y=0), tinggi 1.2
+            const leafBladeMatrix = Array.from(leafStemMatrix);
+            // Translate dari pivot stem (tengah) ke ujung atas stem (+height/2)
+            translate(leafBladeMatrix, [0, leafStemHeight / 2, 0]);
+            rotateX(leafBladeMatrix, nz_leafSway); // Animasi Sway
+            drawCallback(buffers.nuzleafLeafBlade, C.LEAF, 16, leafBladeMatrix);
+
+            // Facemask & Mata (Bentuk Datar)
+            const maskZOffset = headRadiusZ + 0.01;
+            const eyeZOffset = maskZOffset + 0.001;
+            const pupilZOffset = eyeZOffset + 0.001;
+
+            // Gambar Mata & Pupil (posisi disesuaikan)
+            const eyeY = 0.16; const eyeX = 0.20;
+            const pupilY = 0.11; const pupilX = 0.23; // Pupil sedikit lebih luar & bawah dari mata
+            const nz_leye_m = Array.from(nuzleafHeadMatrix); translate(nz_leye_m, [-eyeX, eyeY, eyeZOffset]); drawCallback(buffers.nuzleafLeftEye, C.EYE_WHITE, 8, nz_leye_m);
+            const nz_reye_m = Array.from(nuzleafHeadMatrix); translate(nz_reye_m, [eyeX, eyeY, eyeZOffset]); drawCallback(buffers.nuzleafRightEye, C.EYE_WHITE, 8, nz_reye_m);
+            const nz_lpup_m = Array.from(nuzleafHeadMatrix); translate(nz_lpup_m, [-pupilX, pupilY, pupilZOffset]); drawCallback(buffers.nuzleafEyePupil, C.EYE_PUPIL, 1, nz_lpup_m);
+            const nz_rpup_m = Array.from(nuzleafHeadMatrix); translate(nz_rpup_m, [pupilX, pupilY, pupilZOffset]); drawCallback(buffers.nuzleafEyePupil, C.EYE_PUPIL, 1, nz_rpup_m);
+            const nz_lpupw_m = Array.from(nuzleafHeadMatrix); translate(nz_lpupw_m, [-pupilX, pupilY, pupilZOffset + 0.001]); drawCallback(buffers.nuzleafEyePupilWhite, C.EYE_WHITE, 1, nz_lpupw_m);
+            const nz_rpupw_m = Array.from(nuzleafHeadMatrix); translate(nz_rpupw_m, [pupilX, pupilY, pupilZOffset + 0.001]); drawCallback(buffers.nuzleafEyePupilWhite, C.EYE_WHITE, 1, nz_rpupw_m);
+
+
+            // Anggota Badan (Anak dari Body)
+            const shoulderOffsetX = 0.6; const shoulderOffsetY = -0.3; // Relatif pivot body tengah
+            const armLength = 0.5; // Panjang lengan (dari geom)
+            const handHeight = 0.25; // Tinggi silinder tangan (dari geom)
+
+            // Lengan Kiri: Pivot Cylinder di tengah Y=0
+            const nuzleafLeftArmMatrix = Array.from(nuzleafBodyMatrix);
+            translate(nuzleafLeftArmMatrix, [-shoulderOffsetX, shoulderOffsetY, 0.15]); // Ke bahu
+            rotateZ(nuzleafLeftArmMatrix, -60 * degToRad); // Rotasi bahu
+            drawCallback(buffers.nuzleafArm, C.BODY, 16, nuzleafLeftArmMatrix);
+
+            // Tangan Kiri: Pivot Cylinder di tengah Y=0
+            const nuzleafLeftHandMatrix = Array.from(nuzleafLeftArmMatrix); // Mulai dari matrix lengan
+            translate(nuzleafLeftHandMatrix, [0, -armLength - handHeight / 2, 0]);
+            drawCallback(buffers.nuzleafHand, C.BODY, 16, nuzleafLeftHandMatrix); // Gunakan buffer nuzleafHand
+
+            // Lengan Kanan (Mirrored)
+            const nuzleafRightArmMatrix = Array.from(nuzleafBodyMatrix);
+            translate(nuzleafRightArmMatrix, [shoulderOffsetX, shoulderOffsetY, -0.2]);
+            rotateZ(nuzleafRightArmMatrix, 60 * degToRad);
+            drawCallback(buffers.nuzleafArm, C.BODY, 16, nuzleafRightArmMatrix);
+
+            // Tangan Kanan
+            const nuzleafRightHandMatrix = Array.from(nuzleafRightArmMatrix);
+            translate(nuzleafRightHandMatrix, [0, -armLength - handHeight / 2, 0]);
+            drawCallback(buffers.nuzleafHand, C.BODY, 16, nuzleafRightHandMatrix); // Gunakan buffer nuzleafHand
+
+            // Kaki Kiri: Pivot Cylinder di tengah Y=0
+            const hipOffsetX = 0.18; const hipOffsetY = -bodyHeight / 2; // Bawah body
+            const legLength = 0.5; const footHeightOffset = 0.075;
+
+            const nuzleafLeftLegMatrix = Array.from(nuzleafBodyMatrix);
+            translate(nuzleafLeftLegMatrix, [-hipOffsetX, (hipOffsetY * nz_breathScale) + nz_walkOffset, 0]); // Relatif pivot body + animasi
+            drawCallback(buffers.nuzleafLeg, C.BODY, 16, nuzleafLeftLegMatrix);
+
+            // Kaki Kanan (Mirrored + Animasi berlawanan)
+            const nuzleafRightLegMatrix = Array.from(nuzleafBodyMatrix);
+            translate(nuzleafRightLegMatrix, [hipOffsetX, (hipOffsetY * nz_breathScale) - nz_walkOffset, 0]);
+            drawCallback(buffers.nuzleafLeg, C.BODY, 16, nuzleafRightLegMatrix);
+
+            // Foot Kiri: Pivot Foot di tengah
+            const nuzleafLeftFootMatrix = Array.from(nuzleafLeftLegMatrix);
+            translate(nuzleafLeftFootMatrix, [0, -legLength * 1.8 - footHeightOffset, 0.05]);
+            rotateX(nuzleafLeftFootMatrix, 5 * degToRad); // Kurangi kemiringan
+            drawCallback(buffers.nuzleafFoot, C.BODY, 8, nuzleafLeftFootMatrix);
+
+            // Foot Kanan
+            const nuzleafRightFootMatrix = Array.from(nuzleafRightLegMatrix);
+            translate(nuzleafRightFootMatrix, [0, -legLength * 1.8 - footHeightOffset, 0.05]);
+            rotateX(nuzleafRightFootMatrix, 5 * degToRad);
+            drawCallback(buffers.nuzleafFoot, C.BODY, 8, nuzleafRightFootMatrix);
+
+            // Celana/Diaper (Anak dari Body) - Pivot Ellipsoid di tengah
+            const diaperOffsetY = -bodyHeight / 2 - 0.2; // Naik sedikit dari dasar body
+            const diaperOffsetX = 0.15;
+            const diaperScaleY = 1.0; // Kembalikan skala Y
+            const nuzleafLeftDiaperMatrix = Array.from(nuzleafBodyMatrix);
+            translate(nuzleafLeftDiaperMatrix, [-diaperOffsetX, diaperOffsetY * nz_breathScale, 0]); // Sesuaikan Y dengan nafas
+            scale(nuzleafLeftDiaperMatrix, [1, diaperScaleY, 1]);
+            drawCallback(buffers.nuzleafDiaperHalf, C.DIAPER, 24, nuzleafLeftDiaperMatrix);
+
+            const nuzleafRightDiaperMatrix = Array.from(nuzleafBodyMatrix);
+            translate(nuzleafRightDiaperMatrix, [diaperOffsetX, diaperOffsetY * nz_breathScale, 0]);
+            scale(nuzleafRightDiaperMatrix, [1, diaperScaleY, 1]);
+            drawCallback(buffers.nuzleafDiaperHalf, C.DIAPER, 24, nuzleafRightDiaperMatrix);
+
+            // Strip Celana (Anak dari Celana) - Pivot Strip Y=0
+            const stripYOffset1 = 0.15 * diaperScaleY; // Naikkan strip atas
+            const stripYOffset2 = -0.15 * diaperScaleY; // Turunkan strip bawah
+            const stripRadiusOriginal = 0.48; // Radius asli strip (dari geom)
+            const diaperRadiusTarget = 0.5; // Radius X diaper
+            const stripScaleFactor = diaperRadiusTarget / stripRadiusOriginal;
+
+            const nuzleafLStrip1M = Array.from(nuzleafLeftDiaperMatrix);
+            translate(nuzleafLStrip1M, [0, stripYOffset1 / diaperScaleY, 0]);
+            rotateX(nuzleafLStrip1M, 0 * degToRad);
+            scale(nuzleafLStrip1M, [stripScaleFactor, 1, stripScaleFactor]);
+            drawCallback(buffers.nuzleafDiaperStrip, C.DIAPER_STRIP, 8, nuzleafLStrip1M);
+
+            const nuzleafLStrip2M = Array.from(nuzleafLeftDiaperMatrix);
+            translate(nuzleafLStrip2M, [0, stripYOffset2 / diaperScaleY, 0]);
+            rotateX(nuzleafLStrip2M, 0 * degToRad);
+            scale(nuzleafLStrip2M, [stripScaleFactor, 1, stripScaleFactor]);
+            drawCallback(buffers.nuzleafDiaperStrip, C.DIAPER_STRIP, 8, nuzleafLStrip2M);
+
+            const nuzleafRStrip1M = Array.from(nuzleafRightDiaperMatrix);
+            translate(nuzleafRStrip1M, [0, stripYOffset1 / diaperScaleY, 0]);
+            rotateX(nuzleafRStrip1M, 0 * degToRad);
+            scale(nuzleafRStrip1M, [stripScaleFactor, 1, stripScaleFactor]);
+            drawCallback(buffers.nuzleafDiaperStrip, C.DIAPER_STRIP, 8, nuzleafRStrip1M);
+
+            const nuzleafRStrip2M = Array.from(nuzleafRightDiaperMatrix);
+            translate(nuzleafRStrip2M, [0, stripYOffset2 / diaperScaleY, 0]);
+            rotateX(nuzleafRStrip2M, 0 * degToRad);
+            scale(nuzleafRStrip2M, [stripScaleFactor, 1, stripScaleFactor]);
+            drawCallback(buffers.nuzleafDiaperStrip, C.DIAPER_STRIP, 8, nuzleafRStrip2M);
+        }
+
+
+
+        function initShadowFramebuffer(gl, w, h) { const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb); const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0); const depth = gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER, depth); gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h); gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth); gl.bindFramebuffer(gl.FRAMEBUFFER, null); return { framebuffer: fb, shadowTexture: tex, width: w, height: h }; }
+
+        function loadTexture(gl, url) { const texture = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, texture); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 255, 255])); const image = new Image(); image.crossOrigin = ""; image.onload = function () { gl.bindTexture(gl.TEXTURE_2D, texture); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); }; image.src = url; return texture; }
+
+
+
+        function createSeedotGeometry() { const slices = 64; function qB(p0, p1, p2, t) { const o = 1 - t; const r = o * o * p0.r + 2 * o * t * p1.r + t * t * p2.r; const y = o * o * p0.y + 2 * o * t * p1.y + t * t * p2.y; return { r, y } } function cPB(s, r) { const p = []; for (let i = 0; i < s.length; i++) { const [p0, p1, p2] = s[i]; for (let j = 0; j < r; j++) { p.push(qB(p0, p1, p2, j / r)) } } p.push(s[s.length - 1][2]); return p } function cOP(p) { const v = [], n = [], idx = []; for (let i = 0; i < p.length - 1; i++) { const p1 = p[i], p2 = p[i + 1]; const s = v.length / 3; for (let j = 0; j <= slices; j++) { const a = j / slices * 2 * Math.PI; const c = Math.cos(a), sA = Math.sin(a); v.push(p1.r * c, p1.y, p1.r * sA); v.push(p2.r * c, p2.y, p2.r * sA); const t = { y: p2.y - p1.y, r: p2.r - p1.r }; const N = normalizeVector([t.y * c, -t.r, t.y * sA]); n.push(...N, ...N) } for (let j = 0; j < slices; j++) { const bl = s + j * 2, tl = s + j * 2 + 1, br = s + (j + 1) * 2, tr = s + (j + 1) * 2 + 1; idx.push(bl, tl, br, br, tl, tr) } } return { vertices: v, normals: n, indices: idx } } function cFOG(w, h, seg = 32) { const v = [0, 0, 0], ns = [0, 0, 1], idx = []; for (let i = 0; i <= seg; i++) { const a = i / seg * 2 * Math.PI; v.push(Math.cos(a) * w, Math.sin(a) * h, 0); ns.push(0, 0, 1) } for (let i = 1; i <= seg; i++)idx.push(0, i, i + 1); return { vertices: v, normals: ns, indices: idx } } const hBS = [[{ y: 0, r: 1 }, { y: .1, r: 1.35 }, { y: .25, r: 1.22 }], [{ y: .25, r: 1.22 }, { y: .35, r: 1.15 }, { y: .45, r: 1 }], [{ y: .45, r: 1 }, { y: .6, r: .9 }, { y: .7, r: .8 }], [{ y: .7, r: .8 }, { y: .8, r: .7 }, { y: .85, r: .55 }]]; const hP = cPB(hBS, 16); const hat = cOP(hP); const tCP = hP[hP.length - 1]; const tCCI = hat.vertices.length / 3; hat.vertices.push(0, tCP.y, 0); hat.normals.push(0, 1, 0); const tRSI = hat.vertices.length / 3 - 1 - (slices + 1) * 2; for (let j = 0; j < slices; j++)hat.indices.push(tRSI + j * 2 + 1, tCCI, tRSI + (j + 1) * 2 + 1); const sBY = tCP.y, sH = .3, sR = .12; let bVI = hat.vertices.length / 3; for (let j = 0; j <= slices; j++) { const a = j / slices * 2 * Math.PI, c = Math.cos(a), s = Math.sin(a); hat.vertices.push(sR * c, sBY, sR * s, sR * c, sBY + sH, sR * s); hat.normals.push(c, 0, s, c, 0, s) } for (let j = 0; j < slices; j++) { const i = bVI + j * 2; hat.indices.push(i, i + 1, i + 2, i + 2, i + 1, i + 3) } let tCI = hat.vertices.length / 3; hat.vertices.push(0, sBY + sH, 0); hat.normals.push(0, 1, 0); for (let j = 0; j < slices; j++)hat.indices.push(tCI, bVI + j * 2 + 1, bVI + ((j + 1) % slices) * 2 + 1); const bP = [{ y: .1, r: 1.19 }, { y: -.2, r: 1.18 }, { y: -.3, r: 1.17 }, { y: -.4, r: 1.16 }, { y: -.5, r: 1.15 }, { y: -.6, r: 1.14 }, { y: -.7, r: 1.13 }, { y: -.8, r: 1.12 }, { y: -.9, r: 1.1 }, { y: -.92, r: 1.09 }, { y: -.97, r: 1.07 }, { y: -0.99, r: 1.05 }, { y: -1, r: 1.03 }, { y: -1.05, r: .98 }, { y: -1.1, r: .93 }, { y: -1.2, r: .84 }, { y: -1.3, r: .73 }, { y: -1.4, r: .62 }, { y: -1.5, r: .5 }, { y: -1.65, r: .28 }, { y: -1.77, r: 0 }]; const body = cOP(bP); const fP = [{ y: 0, r: 0 }, { y: -.1, r: .45 }, { y: -.3, r: .4 }, { y: -.45, r: .2 }, { y: -.5, r: 0 }]; const foot = cOP(fP); const eyeOuter = cFOG(.45, .6), eyePupil = cFOG(.2, .3), eyeHighlight = cFOG(.08, .12); return { hat, body, foot, eyeOuter, eyePupil, eyeHighlight } }
+
+
+
+        function createEnvironmentGeometry() {
+
+            function createDeciduousTreeGeometry() {
+
+                const trunkProfile = [{ r: 0.4, y: 0 }, { r: 0.4, y: 6 }];
+
+                const trunk = createGeometryFromProfile(trunkProfile, 12);
+
+                const canopyVertices = [], canopyNormals = [], canopyIndices = [];
+
+                [[2.5, [0, 6, 0]], [2, [1.2, 5, 1]], [1.8, [-1, 5.2, -1.2]], [2.2, [-0.5, 4.5, 1.5]]].forEach(p => {
+
+                    const sphereGeom = createSphereGeometry(p[0], 2);
+
+                    const baseIndex = canopyVertices.length / 3;
+
+                    for (let i = 0; i < sphereGeom.vertices.length; i += 3) {
+
+                        canopyVertices.push(sphereGeom.vertices[i] + p[1][0], sphereGeom.vertices[i + 1] + p[1][1], sphereGeom.vertices[i + 2] + p[1][2]);
+
+                    }
+
+                    canopyNormals.push(...sphereGeom.normals);
+
+                    sphereGeom.indices.forEach(idx => canopyIndices.push(idx + baseIndex));
+
+                });
+
+                return { trunk, canopy: { vertices: canopyVertices, normals: canopyNormals, indices: canopyIndices } };
+
+            }
+
+
+
+            function createPineTreeGeometry() {
+
+                const trunkProfile = [{ r: 0.3, y: 0 }, { r: 0.2, y: 5 }];
+
+                const trunk = createGeometryFromProfile(trunkProfile, 8);
+
+                const canopyProfile = [{ r: 1.8, y: 1 }, { r: 0, y: 7 }];
+
+                const canopy = createGeometryFromProfile(canopyProfile, 12);
+
+                return { trunk, canopy };
+
+            }
+
+
+
+            function createRockGeometry() {
+
+                const rock = createSphereGeometry(0.8, 3);
+
+                for (let i = 0; i < rock.vertices.length; i += 3) {
+
+                    const x = rock.vertices[i], y = rock.vertices[i + 1], z = rock.vertices[i + 2];
+
+                    const displacement = (PerlinNoise.noise(x * 2, y * 2, z * 2) + 1) / 2 * 0.4;
+
+                    rock.vertices[i] += displacement;
+
+                    rock.vertices[i + 1] += displacement;
+
+                    rock.vertices[i + 2] += displacement;
+
+                }
+
+                return rock;
+
+            }
+
+
+
+            function createFireflyGeometry(count, area) {
+
+                const positions = [];
+
+                const offsets = [];
+
+                for (let i = 0; i < count; i++) {
+
+                    const x = (Math.random() - 0.5) * area.x;
+
+                    const z = (Math.random() - 0.5) * area.z;
+
+                    const y = getGroundHeight(x, z) + Math.random() * 5 + 1;
+
+                    if (y < RIVER_BED + 1.0) continue;
+
+                    positions.push(x, y, z);
+
+                    offsets.push(Math.random());
+
+                }
+
+                return { positions: new Float32Array(positions), offsets: new Float32Array(offsets) };
+
+            }
+
+
+
+            function createCloudGeometry(numParticles, minX, maxX, minY, maxY, minZ, maxZ) {
+
+                const positions = [];
+
+                const offsets = [];
+
+                for (let i = 0; i < numParticles; i++) {
+
+                    positions.push(
+
+                        lerp(minX, maxX, Math.random()),
+
+                        lerp(minY, maxY, Math.random()),
+
+                        lerp(minZ, maxZ, Math.random())
+
+                    );
+
+                    offsets.push(Math.random());
+
+                }
+
+                return { positions: new Float32Array(positions), offsets: new Float32Array(offsets) };
+
+            }
+
+
+
+            function createCubeGeometry(width, height, depth) {
+
+                const w = width / 2;
+
+                const h = height / 2;
+
+                const d = depth / 2;
+
+
+
+                const vertices = [
+
+                    // Front face
+
+                    -w, -h, d, w, -h, d, w, h, d, -w, h, d,
+
+                    // Back face
+
+                    -w, -h, -d, -w, h, -d, w, h, -d, w, -h, -d,
+
+                    // Top face
+
+                    -w, h, -d, -w, h, d, w, h, d, w, h, -d,
+
+                    // Bottom face
+
+                    -w, -h, -d, w, -h, -d, w, -h, d, -w, -h, d,
+
+                    // Right face
+
+                    w, -h, -d, w, h, -d, w, h, d, w, -h, d,
+
+                    // Left face
+
+                    -w, -h, -d, -w, -h, d, -w, h, d, -w, h, -d,
+
+                ];
+
+
+
+                const normals = [
+
+                    // Front
+
+                    0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+
+                    // Back
+
+                    0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1,
+
+                    // Top
+
+                    0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0,
+
+                    // Bottom
+
+                    0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0,
+
+                    // Right
+
+                    1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0,
+
+                    // Left
+
+                    -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0,
+
+                ];
+
+
+
+                const indices = [
+
+                    0, 1, 2, 0, 2, 3,    // front
+
+                    4, 5, 6, 4, 6, 7,    // back
+
+                    8, 9, 10, 8, 10, 11,   // top
+
+                    12, 13, 14, 12, 14, 15,   // bottom
+
+                    16, 17, 18, 16, 18, 19,   // right
+
+                    20, 21, 22, 20, 22, 23,   // left
+
+                ];
+
+
+
+                return { vertices: vertices, normals: normals, indices: indices };
+
+            }
+
+
+
+            function createHouseGeometry(baseWidth = 8, baseHeight = 5, baseDepth = 6) {
+
+                const body = createCubeGeometry(baseWidth, baseHeight, baseDepth);
+
+
+
+                const roofHeight = baseHeight * 0.7;
+
+                const roofOverhang = 0.5;
+
+                const w = (baseWidth / 2) + roofOverhang;
+
+                const d = (baseDepth / 2) + roofOverhang;
+
+                const yBase = baseHeight / 2;
+
+                const yApex = yBase + roofHeight;
+
+
+
+                const roofVertices = [
+
+                    // Sisi Kiri Atap
+
+                    -w, yBase, d,  // 0
+
+                    -w, yBase, -d,  // 1
+
+                    0, yApex, d,  // 2
+
+                    0, yApex, -d,  // 3
+
+                    // Sisi Kanan Atap
+
+                    w, yBase, d,  // 4
+
+                    w, yBase, -d,  // 5
+
+                    0, yApex, d,  // 6
+
+                    0, yApex, -d,  // 7
+
+                    // Segitiga Depan (Gable)
+
+                    -w, yBase, d,  // 8
+
+                    w, yBase, d,  // 9
+
+                    0, yApex, d,  // 10
+
+                    // Segitiga Belakang (Gable)
+
+                    -w, yBase, -d, // 11
+
+                    w, yBase, -d, // 12
+
+                    0, yApex, -d, // 13
+
+                ];
+
+
+
+                const n_left = normalizeVector(crossProduct([-w, yBase, -d - d], [0 - (-w), yApex - yBase, d - d]));
+
+                const n_right = normalizeVector(crossProduct([w - w, yBase - yBase, -d - d], [0 - w, yApex - yBase, d - d]));
+
+                const n_front = [0, 0, 1];
+
+                const n_back = [0, 0, -1];
+
+
+
+                const roofNormals = [
+
+                    ...n_left, ...n_left, ...n_left, ...n_left,
+
+                    ...n_right, ...n_right, ...n_right, ...n_right,
+
+                    ...n_front, ...n_front, ...n_front,
+
+                    ...n_back, ...n_back, ...n_back,
+
+                ];
+
+
+
+                const roofIndices = [
+
+                    0, 1, 2, 2, 1, 3,  // Sisi Kiri
+
+                    4, 6, 5, 5, 6, 7,  // Sisi Kanan
+
+                    8, 9, 10,           // Segitiga Depan
+
+                    11, 13, 12,           // Segitiga Belakang
+
+                ];
+
+
+
+                const roof = { vertices: roofVertices, normals: roofNormals, indices: roofIndices };
+
+
+
+                const door = createCubeGeometry(baseWidth * 0.2, baseHeight * 0.4, 0.1); // 1.6w x 2h
+
+                const window = createCubeGeometry(baseWidth * 0.15, baseHeight * 0.2, 0.1); // 1.2w x 1h
+
+                const chimney = createCubeGeometry(baseWidth * 0.1, baseHeight * 0.4, baseWidth * 0.1); // 0.8 x 2.0 x 0.8
+
+
+
+                return { body, roof, door, window, chimney };
+
+            }
+
+
+
+
+
+            const groundWidth = 150, groundDepth = 150, segX = 150, segZ = 150;
+
+            const groundVertices = [], groundNormals = [], groundIndices = [];
+
+            const dx = 0.01;
+
+            for (let i = 0; i <= segZ; i++) {
+
+                for (let j = 0; j <= segX; j++) {
+
+                    const x = (j / segX - 0.5) * groundWidth;
+
+                    const z = (i / segZ - 0.5) * groundDepth;
+
+                    const y = getGroundHeight(x, z);
+
+                    groundVertices.push(x, y, z);
+
+                    const hx = getGroundHeight(x + dx, z);
+
+                    const hz = getGroundHeight(x, z + dx);
+
+                    groundNormals.push(...normalizeVector(crossProduct([0, hz - y, dx], [dx, hx - y, 0])));
+
+                }
+
+            }
+
+            for (let i = 0; i < segZ; i++) {
+
+                for (let j = 0; j < segX; j++) {
+
+                    const a = i * (segX + 1) + j, b = a + 1;
+
+                    const c = (i + 1) * (segX + 1) + j, d = c + 1;
+
+                    groundIndices.push(a, c, b, b, c, d);
+
+                }
+
+            }
+
+            const ground = { vertices: groundVertices, normals: groundNormals, indices: groundIndices };
+
+
+
+            const grassVertices = [], grassNormals = [], grassIndices = [];
+
+            for (let i = 0; i < 15000; i++) {
+
+                const x = (Math.random() - 0.5) * groundWidth, z = (Math.random() - 0.5) * groundDepth;
+
+                const y = getGroundHeight(x, z);
+
+                if (y < RIVER_BED + 0.2) continue;
+
+                const h = Math.random() * 0.5 + 0.3, w = 0.2;
+
+                const baseIndex = grassVertices.length / 3;
+
+                grassVertices.push(x - w, y, z, x + w, y, z, x - w, y + h, z, x + w, y + h, z);
+
+                grassNormals.push(0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1);
+
+                grassIndices.push(baseIndex, baseIndex + 1, baseIndex + 2, baseIndex + 2, baseIndex + 1, baseIndex + 3);
+
+                grassVertices.push(x, y, z - w, x, y, z + w, x, y + h, z - w, x, y + h, z + w);
+
+                grassNormals.push(1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0);
+
+                grassIndices.push(baseIndex + 4, baseIndex + 5, baseIndex + 6, baseIndex + 6, baseIndex + 5, baseIndex + 7);
+
+            }
+
+            const grass = { vertices: grassVertices, normals: grassNormals, indices: grassIndices };
+
+
+
+            const waterVertices = [], waterIndices = [];
+
+            const waterSegs = 100;
+
+            const vertexMap = new Map();
+
+            let vertexCounter = 0;
+
+            for (let i = 0; i <= waterSegs; i++) {
+
+                for (let j = 0; j <= waterSegs; j++) {
+
+                    const x = (j / waterSegs - 0.5) * groundWidth;
+
+                    const z = (i / waterSegs - 0.5) * groundDepth;
+
+                    if (getRiverInfluence(x, z) < 1.0) {
+
+                        waterVertices.push(x, RIVER_BED + 0.2, z);
+
+                        vertexMap.set(`${i}_${j}`, vertexCounter++);
+
+                    }
+
+                }
+
+            }
+
+            for (let i = 0; i < waterSegs; i++) {
+
+                for (let j = 0; j < waterSegs; j++) {
+
+                    const a = vertexMap.get(`${i}_${j}`);
+
+                    const b = vertexMap.get(`${i}_${j + 1}`);
+
+                    const c = vertexMap.get(`${i + 1}_${j}`);
+
+                    const d = vertexMap.get(`${i + 1}_${j + 1}`);
+
+                    if (a !== undefined && b !== undefined && c !== undefined) waterIndices.push(a, c, b);
+
+                    if (b !== undefined && c !== undefined && d !== undefined) waterIndices.push(b, c, d);
+
+                }
+
+            }
+
+            const water = { vertices: waterVertices, normals: [], indices: waterIndices };
+
+
+
+            return { ground, tree: createDeciduousTreeGeometry(), pineTree: createPineTreeGeometry(), rock: createRockGeometry(), grass, water, fireflies: createFireflyGeometry(300, { x: groundWidth, z: groundDepth }), clouds: createCloudGeometry(500, -100, 100, 50, 80, -100, 100), house: createHouseGeometry(), skybox: createSphereGeometry(1, 5) };
+
+        }
+
+
+
+        function createGeometryFromProfile(profile, slices = 32) { const vertices = [], normals = [], indices = []; for (let i = 0; i < profile.length - 1; i++) { const p1 = profile[i], p2 = profile[i + 1]; const startIndex = vertices.length / 3; for (let j = 0; j <= slices; j++) { const angle = j / slices * 2 * Math.PI; const cosAngle = Math.cos(angle), sinAngle = Math.sin(angle); vertices.push(p1.r * cosAngle, p1.y, p1.r * sinAngle); vertices.push(p2.r * cosAngle, p2.y, p2.r * sinAngle); const tangent = { y: p2.y - p1.y, r: p2.r - p1.r }; const normal = normalizeVector([tangent.y * cosAngle, -tangent.r, tangent.y * sinAngle]); normals.push(...normal, ...normal); } for (let j = 0; j < slices; j++) { const bl = startIndex + j * 2, tl = startIndex + j * 2 + 1; const br = startIndex + (j + 1) * 2, tr = startIndex + (j + 1) * 2 + 1; indices.push(bl, tl, br, br, tl, tr); } } return { vertices, normals, indices }; }
+
+        function createSphereGeometry(r, s) { const t = (1 + Math.sqrt(5)) / 2; let v = [-1, t, 0, 1, t, 0, -1, -t, 0, 1, -t, 0, 0, -1, t, 0, 1, t, 0, -1, -t, 0, 1, -t, t, 0, -1, t, 0, 1, -t, 0, -1, -t, 0, 1]; let idx = [0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1]; let mC = {}; function gMP(p1, p2) { const k = Math.min(p1, p2) + "_" + Math.max(p1, p2); if (mC[k]) return mC[k]; const v1 = [v[p1 * 3], v[p1 * 3 + 1], v[p1 * 3 + 2]], v2 = [v[p2 * 3], v[p2 * 3 + 1], v[p2 * 3 + 2]]; const m = [(v1[0] + v2[0]) / 2, (v1[1] + v2[1]) / 2, (v1[2] + v2[2]) / 2]; v.push(...normalizeVector(m)); return mC[k] = v.length / 3 - 1 } for (let i = 0; i < s; i++) { const nI = []; for (let j = 0; j < idx.length; j += 3) { let a = gMP(idx[j], idx[j + 1]), b = gMP(idx[j + 1], idx[j + 2]), c = gMP(idx[j + 2], idx[j]); nI.push(idx[j], a, c, idx[j + 1], b, a, idx[j + 2], c, b, a, b, c) } idx = nI } for (let i = 0; i < v.length; i += 3) { const l = Math.sqrt(v[i] ** 2 + v[i + 1] ** 2 + v[i + 2] ** 2); v[i] *= r / l; v[i + 1] *= r / l; v[i + 2] *= r / l } return { vertices: v, normals: v, indices: idx } }
+
+        function initBuffers(gl, geom) { if (!geom || !geom.vertices) { console.error("Geometri tidak valid:", geom); return { count: 0 }; } const p = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, p); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(geom.vertices), gl.STATIC_DRAW); const n = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, n); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(geom.normals.length > 0 ? geom.normals : geom.vertices), gl.STATIC_DRAW); const i = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, i); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(geom.indices), gl.STATIC_DRAW); return { position: p, normal: n, indices: i, count: geom.indices.length } }
+
+        function initBuffersWithColor(gl, geom) {
+            if (!geom || !geom.vertices) { console.error("Geometri tidak valid:", geom); return { count: 0 }; }
+
+            const p = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, p);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(geom.vertices), gl.STATIC_DRAW);
+
+            const n = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, n);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(geom.normals.length > 0 ? geom.normals : geom.vertices), gl.STATIC_DRAW);
+
+            const c = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, c);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(geom.colors), gl.STATIC_DRAW);
+
+            const i = gl.createBuffer();
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, i);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(geom.indices), gl.STATIC_DRAW);
+
+            return { position: p, normal: n, color: c, indices: i, count: geom.indices.length };
+        }
+        function initFireflyBuffers(gl, geom) { const p = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, p); gl.bufferData(gl.ARRAY_BUFFER, geom.positions, gl.STATIC_DRAW); const o = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, o); gl.bufferData(gl.ARRAY_BUFFER, geom.offsets, gl.STATIC_DRAW); return { position: p, offset: o, count: geom.positions.length / 3 }; }
+
+        function initCloudBuffers(gl, geom) { const p = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, p); gl.bufferData(gl.ARRAY_BUFFER, geom.positions, gl.STATIC_DRAW); const o = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, o); gl.bufferData(gl.ARRAY_BUFFER, geom.offsets, gl.STATIC_DRAW); return { position: p, offset: o, count: geom.positions.length / 3 }; }
+
+
+
+        function initShaderProgram(gl, vs, fs) { const p = gl.createProgram(), v = loadShader(gl, gl.VERTEX_SHADER, vs), f = loadShader(gl, gl.FRAGMENT_SHADER, fs); gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { console.error('Shader program init error: ' + gl.getProgramInfoLog(p)); return null } return p }
+
+        function loadShader(gl, type, source) { const s = gl.createShader(type); gl.shaderSource(s, source); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.error('Shader compile error: ' + gl.getShaderInfoLog(s)); gl.deleteShader(s); return null } return s }
+
+        function resizeCanvasToDisplaySize(c) { const d = window.devicePixelRatio || 1, w = Math.round(c.clientWidth * d), h = Math.round(c.clientHeight * d); if (c.width !== w || c.height !== h) { c.width = w; c.height = h; return true } return false }
+
+        function createIdentityMatrix() { return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }
+
+        function rotateX(m, a) { const s = Math.sin(a), c = Math.cos(a), m1 = m[1], m2 = m[2], m5 = m[5], m6 = m[6], m9 = m[9], m10 = m[10]; m[1] = m1 * c - m2 * s; m[2] = m1 * s + m2 * c; m[5] = m5 * c - m6 * s; m[6] = m5 * s + m6 * c; m[9] = m9 * c - m10 * s; m[10] = m9 * s + m10 * c }
+
+        function rotateY(m, a) { const s = Math.sin(a), c = Math.cos(a), m0 = m[0], m2 = m[2], m4 = m[4], m6 = m[6], m8 = m[8], m10 = m[10]; m[0] = m0 * c + m2 * s; m[2] = m2 * c - m0 * s; m[4] = m4 * c + m6 * s; m[6] = m6 * c - m4 * s; m[8] = m8 * c + m10 * s; m[10] = m10 * c - m8 * s }
+
+        function rotateZ(m, a) { const s = Math.sin(a), c = Math.cos(a), m0 = m[0], m1 = m[1], m4 = m[4], m5 = m[5], m8 = m[8], m9 = m[9]; m[0] = m0 * c - m1 * s; m[1] = m0 * s + m1 * c; m[4] = m4 * c - m5 * s; m[5] = m4 * s + m5 * c; m[8] = m8 * c - m9 * s; m[9] = m8 * s + m9 * c; }
+
+        function translate(m, v) { const v0 = v[0], v1 = v[1], v2 = v[2]; m[12] = m[0] * v0 + m[4] * v1 + m[8] * v2 + m[12]; m[13] = m[1] * v0 + m[5] * v1 + m[9] * v2 + m[13]; m[14] = m[2] * v0 + m[6] * v1 + m[10] * v2 + m[14]; }
+
+        function scale(m, v) { const v0 = v[0], v1 = v[1], v2 = v[2]; m[0] *= v0; m[1] *= v0; m[2] *= v0; m[4] *= v1; m[5] *= v1; m[6] *= v1; m[8] *= v2; m[9] *= v2; m[10] *= v2; }
+
+        function createPerspectiveMatrix(fov, a, n, f) { const p = 1 / Math.tan(fov / 2), q = 1 / (n - f); return [p / a, 0, 0, 0, 0, p, 0, 0, 0, 0, (f + n) * q, -1, 0, 0, 2 * f * n * q, 0] }
+
+        function createOrthographicMatrix(l, r, b, t, n, f) { const w = r - l, h = t - b, d = f - n; return [2 / w, 0, 0, 0, 0, 2 / h, 0, 0, 0, 0, -2 / d, 0, -(r + l) / w, -(t + b) / h, -(f + n) / d, 1] }
+
+        function createLookAtMatrix(e, c, u) { let z0 = e[0] - c[0], z1 = e[1] - c[1], z2 = e[2] - c[2], l = 1 / Math.sqrt(z0 * z0 + z1 * z1 + z2 * z2); z0 *= l; z1 *= l; z2 *= l; let x0 = u[1] * z2 - u[2] * z1, x1 = u[2] * z0 - u[0] * z2, x2 = u[0] * z1 - u[1] * z0; l = 1 / Math.sqrt(x0 * x0 + x1 * x1 + x2 * x2); x0 *= l; x1 *= l; x2 *= l; let y0 = z1 * x2 - z2 * x1, y1 = z2 * x0 - z0 * x2, y2 = z0 * x1 - z1 * x0; return [x0, y0, z0, 0, x1, y1, z1, 0, x2, y2, z2, 0, -(x0 * e[0] + x1 * e[1] + x2 * e[2]), -(y0 * e[0] + y1 * e[1] + y2 * e[2]), -(z0 * e[0] + z1 * e[1] + z2 * e[2]), 1] }
+
+        function normalizeVector(v) { const l = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); if (l > 0.00001) return [v[0] / l, v[1] / l, v[2] / l]; else return [0, 0, 0] }
+
+        function crossProduct(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+        function vec3Add(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
+        function vec3Subtract(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+        function vec3Scale(a, s) { return [a[0] * s, a[1] * s, a[2] * s]; }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        function lerpVec3(a, b, t) { return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]; }
+        function smoothstep(edge0, edge1, x) {
+            const t = Math.max(0.0, Math.min(1.0, (x - edge0) / (edge1 - edge0)));
+            return t * t * (3.0 - 2.0 * t);
+        }
+        function rotateAroundAxis(m, angleRad, axis) {
+            let x = axis[0], y = axis[1], z = axis[2];
+            let len = Math.hypot(x, y, z);
+            if (len < 0.00001) { return; }
+            len = 1 / len;
+            x *= len; y *= len; z *= len;
+
+            let s = Math.sin(angleRad);
+            let c = Math.cos(angleRad);
+            let t = 1 - c;
+
+            let b00 = x * x * t + c, b01 = y * x * t + z * s, b02 = z * x * t - y * s;
+            let b10 = x * y * t - z * s, b11 = y * y * t + c, b12 = z * y * t + x * s;
+            let b20 = x * z * t + y * s, b21 = y * z * t - x * s, b22 = z * z * t + c;
+
+            let a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
+            let a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];
+            let a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11];
+
+
+            m[0] = a00 * b00 + a10 * b01 + a20 * b02;
+            m[1] = a01 * b00 + a11 * b01 + a21 * b02;
+            m[2] = a02 * b00 + a12 * b01 + a22 * b02;
+            m[3] = a03 * b00 + a13 * b01 + a23 * b02;
+            m[4] = a00 * b10 + a10 * b11 + a20 * b12;
+            m[5] = a01 * b10 + a11 * b11 + a21 * b12;
+            m[6] = a02 * b10 + a12 * b11 + a22 * b12;
+            m[7] = a03 * b10 + a13 * b11 + a23 * b12;
+            m[8] = a00 * b20 + a10 * b21 + a20 * b22;
+            m[9] = a01 * b20 + a11 * b21 + a21 * b22;
+            m[10] = a02 * b20 + a12 * b21 + a22 * b22;
+            m[11] = a03 * b20 + a13 * b21 + a23 * b22;
+
+        }
+
+
+        window.onload = main;
+    </script>
+</body>
+
+</html>
